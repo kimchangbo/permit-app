@@ -3074,6 +3074,42 @@ if 'result_df' not in st.session_state:
 # =====================================================================
 # ★ 국가법령정보 통신 엔진
 # =====================================================================
+_LAW_DENY = "⛔ 법제처 거부"
+
+
+def _law_api_err(root):
+    """[2026-10-30] 법제처가 키 · 서버 주소를 거부하면 <Response><result>…</result><msg>…</msg></Response> 로 답함
+    (예 : '사용자 정보 검증에 실패하였습니다.') — 전에는 이것을 '검색 결과 없음'으로 보였음 → 거부 사유를 그대로 돌려줌"""
+    em = root.findtext('.//errMsg')
+    if em:
+        return f"{_LAW_DENY} : {em.strip()}"
+    if root.tag == 'Response' and root.find('.//totalCnt') is None:
+        r_, m_ = (root.findtext(k, default='').strip() for k in ('result', 'msg'))
+        if r_ or m_:
+            return f"{_LAW_DENY} : " + " — ".join(x for x in (r_, m_) if x)
+    return None
+
+
+def _law_oc_secret():
+    """[2026-10-30] 관리자가 Streamlit Cloud Secrets 에 넣은 법제처 OC 키 (LAW_OC 등) — 화면 · 코드에는 키를 두지 않음.
+    [섹션] 아래에 넣은 경우도 찾음. 없으면 '' """
+    import os as _os
+    names = ("LAW_OC", "LAW_API_KEY", "LAW_KEY", "OC", "law_oc")
+    try:
+        sec = st.secrets
+        for n_ in names:
+            if sec.get(n_):
+                return str(sec.get(n_)).strip()
+        for v_ in sec.values():
+            if hasattr(v_, "get"):
+                for n_ in names:
+                    if v_.get(n_):
+                        return str(v_.get(n_)).strip()
+    except Exception:
+        pass
+    return next((_os.environ[n_].strip() for n_ in names if _os.environ.get(n_)), "")
+
+
 def fetch_law_info(api_key, law_name):
     url = "https://www.law.go.kr/DRF/lawSearch.do"
     oc_key = api_key.strip() if api_key.strip() else "test"
@@ -3085,10 +3121,10 @@ def fetch_law_info(api_key, law_name):
         res = requests.get(url, params=params, headers=headers, timeout=10)
         res.raise_for_status()
         root = ET.fromstring(res.text)
-        
-        err_msg = root.find('.//errMsg')
-        if err_msg is not None:
-            result["실제 법령명"] = f"API 오류: {err_msg.text}"
+
+        err_msg = _law_api_err(root)
+        if err_msg:
+            result["실제 법령명"] = err_msg
             return result
             
         total_cnt = root.findtext('.//totalCnt', default='0')
@@ -3132,7 +3168,12 @@ def fetch_admrul_info(oc_key, law_name, result):
         res = requests.get("https://www.law.go.kr/DRF/lawSearch.do", params=params,
                            headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         res.raise_for_status()
-        node = ET.fromstring(res.text).find('.//admrul')
+        root = ET.fromstring(res.text)
+        err_msg = _law_api_err(root)
+        if err_msg:
+            result["실제 법령명"] = err_msg
+            return result
+        node = root.find('.//admrul')
         if node is None:
             result["실제 법령명"] = "검색 결과 없음 (법령 · 행정규칙)"
             return result
@@ -4280,21 +4321,47 @@ with col2:
     st.markdown(_H.format("📊 2. 법령 업데이트 결과 대시보드"), unsafe_allow_html=True)
     _k1, _k2 = st.columns([1.15, 1], vertical_alignment="bottom")
     with _k1:
-        user_api_key = st.text_input("⚙️ 시스템 설정 — 🔑 법제처 API 키 (OC) [필수]", value="test", type="password",
-                                     help="기본값 'test' = 법제처 공용 테스트 키. 본인 OC 키가 있으면 입력하세요 (open.law.go.kr 발급).", key="in_시스템_설정_법제처_API_키_OC_필수")
+        _sec_oc = _law_oc_secret()
+        user_api_key = st.text_input("⚙️ 시스템 설정 — 🔑 법제처 API 키 (OC)", value="", type="password",
+                                     placeholder="비워 두면 등록된 키 사용" if _sec_oc else "본인 OC 키 입력",
+                                     help="비워 두면 관리자가 등록한 키(Streamlit Cloud Secrets 'LAW_OC')를 씁니다. 다른 키를 쓰려면 입력하세요 — "
+                                          "open.law.go.kr 에서 OPEN API 활용 신청 (이 앱의 서버 주소 등록) 후 승인된 OC. "
+                                          "공용 'test' 키는 2026.10 현재 법제처가 '사용자 정보 검증 실패'로 거부합니다.", key="in_시스템_설정_법제처_API_키_OC_필수")
+    _typed = user_api_key.strip()
+    if _typed == "test" and _sec_oc:          # 예전 저장 파일 · 입력의 'test' 는 등록 키로 바꿔 씀
+        _typed = ""
+    _eff_key = _typed or _sec_oc or "test"
     with _k2:
-        st.success("💡 법제처 공용 테스트 키 적용 완료" if user_api_key == "test" else "🔑 사용자 OC 키 적용")
+        if _typed:
+            st.info("🔑 입력한 OC 키 사용 (법제처 승인 · 서버 주소 등록 필요)")
+        elif _sec_oc:
+            st.success("🔑 등록된 법제처 키 사용 중")
+        else:
+            st.warning("💡 등록된 키가 없어 공용 'test' 키로 조회합니다 — 법제처가 거부할 수 있으니 본인 OC 키를 넣으세요")
+    with st.expander("🔑 법제처 인증키(OC) 받는 방법"):
+        st.markdown(
+            "법제처 Open API 는 **신청 · 승인된 인증값(OC)** 과 **등록된 서버 주소**가 있어야 조회됩니다. "
+            "(공용 'test' 키는 2026.10 현재 '사용자 정보 검증에 실패하였습니다' 로 거부됨)\n\n"
+            "**① 회원가입 · 로그인** — [국가법령정보 공동활용 (open.law.go.kr)](https://open.law.go.kr) 에 가입한 뒤 로그인\n\n"
+            "**② OPEN API 신청** — 메뉴 '마이페이지 → OPEN API 신청' 에서 사용 신청. "
+            "서버 주소 칸에는 **이 앱의 주소(도메인)** 를 적습니다 — 예 : `xxxx.streamlit.app` (브라우저 주소창의 앱 주소, `https://` 뒤 부분). "
+            "(법제처 안내 : 'OPEN API 호출 시 사용자 검증을 위하여 정확한 서버장비의 IP주소 및 도메인주소를 등록')\n\n"
+            "**③ 승인 확인 · OC 값** — 승인되면 '마이페이지 → API인증키관리' 에서 확인. "
+            "OC = 법제처 API 안내서의 '신청한 API인증값'\n\n"
+            "**④ 앱에 넣기** — 위 '🔑 법제처 API 키 (OC)' 칸에 넣고 '최신 법령 데이터 업데이트 실행'. "
+            "매번 넣지 않으려면 앱 관리자가 Streamlit Cloud → 앱 Settings → **Secrets** 에 `LAW_OC = \"받은 OC\"` 한 줄을 넣으면 "
+            "칸을 비워 둬도 그 키를 씁니다 (키는 화면에 나오지 않음).\n\n"
+            "**안 될 때** — 결과 표에 '⛔ 법제처 거부 : …' 가 나오면 ② 의 서버 주소가 이 앱 주소와 같은지 확인하세요. "
+            "사용신청 · 이용문의 : 법제처 02-2109-6446 (open.law.go.kr 안내)")
     if update_btn:
-        if not user_api_key:
-            st.error("⚠️ 법제처 API 인증키를 입력해주세요.")
-        elif edited_df.empty:
+        if edited_df.empty:
             st.warning("리스트가 비어있습니다.")
         else:
             with st.spinner("데이터 수집 중..."):
                 laws_to_fetch = edited_df["검색 법령명"].dropna().unique()
                 results = []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                    futures = [executor.submit(fetch_law_info, user_api_key, law) for law in laws_to_fetch]
+                    futures = [executor.submit(fetch_law_info, _eff_key, law) for law in laws_to_fetch]
                     for f in concurrent.futures.as_completed(futures):
                         results.append(f.result())
                 api_df = pd.DataFrame(results)
@@ -4304,6 +4371,11 @@ with col2:
 
     if not st.session_state['result_df'].empty:
         res_df = st.session_state['result_df']
+        _deny = res_df['실제 법령명'].astype(str).str.startswith(_LAW_DENY)
+        if _deny.any():
+            st.error(f"⛔ 법제처가 조회를 거부했습니다 ({int(_deny.sum())}/{len(res_df)}건) — "
+                     f"{res_df.loc[_deny, '실제 법령명'].iloc[0].split(' : ', 1)[-1]}\n\n"
+                     "👉 open.law.go.kr 에서 OPEN API 활용 신청 (이 앱의 서버 IP · 도메인 주소 등록) → 승인된 본인 OC 키를 위 칸에 넣고 다시 실행하세요.")
         st.write(
             res_df.to_html(escape=False, index=False, justify='center').replace(
                 '<table', '<table style="width:100%; border-collapse: collapse; text-align:center; font-size:13px;" border="1"'
