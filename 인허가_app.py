@@ -552,7 +552,7 @@ st.set_page_config(page_title="인허가 법령 자동 업데이트 시스템", 
 #   · 💾 이름표(key)가 붙은 입력란 값을 JSON 으로 저장 · 불러오기 (사이드바)
 #   · 🧾 내려받는 Excel · Word · HTML · JSON 에 '계산 정보'(프로그램 판 · 계산 일시 · 입력 지문 · 적용 기준)를 자동으로 붙임
 #   · 📚 이 앱이 인용한 KDS 조항 목록 (확정본 고시 후 점검용 — _기준점검/kds_scan.py)
-_PJ = {'app': '인허가 관련 법령 자동 업데이트', 'no': 23, 'save': True, 'keys': {'scope_mode': 'radio', 'scope_hide': 'checkbox', 'in_시스템_설정_법제처_API_키_OC_필수': 'text_input'}, 'kds': [], 'basis': '앱 화면의 근거 표기 참조', 'tables': {'tb_edited_df': None}, 'credit': '김창보 @ 다온기술', 'lib': True}
+_PJ = {'app': '인허가 관련 법령 자동 업데이트', 'no': 23, 'save': True, 'keys': {'scope_mode': 'radio', 'scope_hide': 'checkbox', 'in_시스템_설정_법제처_API_키_OC_필수': 'text_input'}, 'kds': [], 'basis': '앱 화면의 근거 표기 참조', 'tables': {'tb_edited_df': None}, 'credit': '김창보 @ 다온기술', 'lib': True, 'short': None}
 _PJ_VER = "pj-10"
 
 
@@ -2180,7 +2180,7 @@ def _pj_patch_download():
             hook = S["_pj_lib_hook"] if "_pj_lib_hook" in S else None
             ctx_ = S["_pj_ctx"] if "_pj_ctx" in S else {}
             pn_ = _pj_pname_from(fname, ctx_.get("app", ""))   # [2026-10-26] 앱 자체 저장(14 · 29 · 30)의 프로젝트명 = 저장 파일 이름에서
-            if hook and str(fname or "").lower().endswith(".json") and k.get("key") != "_pj_dl":
+            if hook and str(fname or "").lower().endswith(".json") and not str(k.get("key") or "").startswith("_pj_dl"):
                 # [2026-10-26] 앱 자체 저장(14 · 29 · 30) : 이 앱이 만든 보관 함수에 프로젝트명 + 내려주는 프로젝트 파일 전체를 넘김
                 #   (보관함에서 고르면 그 파일을 앱 자체 불러오기로 되살림 — 기준점 · 관측소 · 표 등 입력칸 밖 상태까지)
                 if callable(d):          # 누르는 순간 파일을 만드는 경우 — 만들 때 보관
@@ -2952,7 +2952,7 @@ def _pj_fname(pn):
     """저장 파일 이름 : 프로그램명-프로젝트명(저장날짜).json — 파일 이름에 못 쓰는 글자는 뺌"""
     import datetime as _dt, re as _re
     pn = _re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", str(pn or "")).strip()
-    app = _re.sub(r'[\\/:*?"<>|]+', " ", str(_PJ["app"])).strip()
+    app = _re.sub(r'[\\/:*?"<>|]+', " ", str(_PJ.get("short") or _PJ["app"])).strip()      # [2026-11-03] 긴 이름은 짧은 이름 (예 : 블록식안벽(결정론))
     return f"{app}{'-' + pn if pn else ''}({_dt.date.today():%Y-%m-%d}).json"
 
 
@@ -2974,16 +2974,37 @@ def _pj_panel(c):
         with slots[i].expander("💾 입력 저장 / 불러오기", expanded=bool(msg)):
             if msg:
                 st.success(msg)
+            _fn_box = [None]
 
             def _save(_S=S):
                 """누르는 순간의 입력값으로 저장 파일을 만듦 (처음 열자마자 눌러도 빈 파일이 되지 않게)"""
+                import time as _tm
+                _tm.sleep(0.8)                    # [2026-11-03] 프로젝트명을 막 입력하고 바로 누르면 그 값이 서버에 닿기 전에 불림 → 잠깐 기다림
                 body = _pj_body(_S)
                 _pj_lib_put(body)                 # 🗄 보관함에도 자동 보관 (보관함을 켠 앱만)
+                try:                              # [2026-11-03] 파일 이름도 누르는 순간의 프로젝트명으로 (전에는 화면 그릴 때 이름 → 두 번 눌러야 새 이름)
+                    from streamlit import runtime as _rt
+                    _m = _rt.get_instance().media_file_mgr
+                    _nf = _pj_fname(body.get("project"))
+                    for _e in _fn_box[1:]:            # 이 단추를 그릴 때 붙잡아 둔 등록 정보 (기다리는 사이 화면이 새로 그려져 목록에서 빠져도 그대로 씀)
+                        _e["filename"] = _nf
+                except Exception:  # noqa: BLE001
+                    pass
                 return _js.dumps(body, ensure_ascii=False, indent=1).encode("utf-8")
             pn = st.text_input("프로젝트명 (저장 파일 이름)", key="_pj_pname", placeholder="예 : 울산신항 8부두",
-                               help="저장 파일 이름 = 프로그램명-프로젝트명(저장날짜).json")
-            st.download_button("💾 입력 저장 (JSON)", _save, file_name=_pj_fname(pn), mime="application/json",
-                               key="_pj_dl", width="stretch")
+                               help="저장 파일 이름 = 프로그램명-프로젝트명(저장날짜).json — 입력한 뒤 Enter (또는 칸 밖을 한 번 누름) 하고 저장")
+            _fn = _pj_fname(pn)
+            _fn_box[0] = _fn
+            # [2026-11-03] 이름이 바뀌면 단추도 새로 (같은 key 면 옛 파일 이름이 남아 프로젝트명이 빠졌음)
+            st.download_button("💾 입력 저장 (JSON)", _save, file_name=_fn, mime="application/json",
+                               key="_pj_dl_" + _pj_finger({"f": _fn})[:8], width="stretch")
+            try:                                  # [2026-11-03] 방금 등록된 이 단추의 지연 다운로드 정보를 붙잡아 둠 (누르는 순간 파일 이름을 바꾸려고)
+                from streamlit import runtime as _rt
+                _fn_box += [_e for _e in list(getattr(_rt.get_instance().media_file_mgr, "_deferred_callables", {}).values())
+                            if _e.get("filename") == _fn]
+            except Exception:  # noqa: BLE001
+                pass
+            st.caption(f"저장될 파일 이름 : {_fn}")
             up = st.file_uploader("📂 저장한 입력 불러오기", type=["json"], key="_pj_up")
             if up is not None and ss.get("_pj_up_id") != up.file_id:
                 ss["_pj_up_id"] = up.file_id
@@ -4437,6 +4458,74 @@ SCOPE_FAC = pd.DataFrame([
     {"선택": False, "시설": "해상풍력발전", "규모": 0.0, "단위": "MW"},
 ])
 
+# [2026-11-06] 판정 기준표 — 판정 코드는 이 표의 값만 씀 (법이 바뀌면 여기만 고침)
+#   확인 : '조문 ✔' = 현행 조문 확인 / '별표 ※' = 별표 수치 (행정규칙집 수록값, 별표 원문 확인 필요) / '종전 ※' = 종전 기준 (신법 별표 원문 확인 필요)
+SCOPE_TH = {
+    "eia_outer":   (300, "m", 2, "환경영향평가", "외곽시설(방파제 · 호안) 길이", "환경영향평가법 시행령 [별표 3] 제4호", "별표 ※"),
+    "eia_recl":    (30000, "m²", 2, "환경영향평가", "항만시설 공유수면 매립 면적", "[별표 3] 제4호", "별표 ※"),
+    "eia_area":    (150000, "m²", 2, "환경영향평가", "그 밖의 항만시설 사업면적 (매립 없음)", "[별표 3] 제4호", "별표 ※"),
+    "eia_dred_a":  (100000, "m²", 2, "환경영향평가", "준설 면적 (유지준설 제외)", "[별표 3] 제4호 다목", "별표 ※"),
+    "eia_dred_v":  (200000, "m³", 2, "환경영향평가", "준설량 (유지준설 제외)", "[별표 3] 제4호 다목", "별표 ※"),
+    "eia_redev":   (300000, "m²", 2, "환경영향평가", "항만재개발 사업면적", "[별표 3] 제4호 마목", "별표 ※"),
+    "eia_r10_p":   (30000, "m²", 2, "환경영향평가", "공유수면 매립 (무역항 · 연안항 · 자연환경보전지역)", "[별표 3] 제10호", "별표 ※"),
+    "eia_r10_o":   (300000, "m²", 2, "환경영향평가", "공유수면 매립 (그 밖의 지역)", "[별표 3] 제10호", "별표 ※"),
+    "eia_re":      (30, "%", 2, "환경영향평가", "재협의 : 규모 증가율", "시행령 제54조", "별표 ※"),
+    "eia_mod":     (10, "%", 2, "환경영향평가", "변경협의 : 규모 증가율", "시행령 제55조", "별표 ※"),
+    "mar_ia_da":   (100000, "m²", 5, "해양이용영향평가", "준설 면적 (유지준설 제외)", "종전 해양환경관리법 시행령 [별표 16] — 신법 [별표 2] 대조", "종전 ※"),
+    "mar_ia_dv":   (200000, "m³", 5, "해양이용영향평가", "준설량 (유지준설 제외)", "종전 [별표 16] — 신법 [별표 2] 대조", "종전 ※"),
+    "mar_g_len":   (150, "m", 5, "일반 해양이용협의", "계류 · 외곽시설 길이", "종전 [별표 15] — 신법 [별표 1] 대조", "종전 ※"),
+    "mar_g_occ":   (3000, "m²", 5, "일반 해양이용협의", "공유수면 점용 · 사용 면적", "종전 [별표 15] — 신법 [별표 1] 대조", "종전 ※"),
+    "mar_g_da":    (50000, "m²", 5, "일반 해양이용협의", "준설 면적 (유지준설 제외)", "종전 [별표 15] — 신법 [별표 1] 대조", "종전 ※"),
+    "mar_g_dv":    (100000, "m³", 5, "일반 해양이용협의", "준설량 (유지준설 제외)", "종전 [별표 15] — 신법 [별표 1] 대조", "종전 ※"),
+    "mar_re":      (30, "%", 5, "해양이용협의", "재협의 : 면적 · 길이 증가율", "해양이용영향평가법 시행령 제17조", "별표 ※"),
+    "dis_a":       (50000, "m²", 9, "재해영향평가", "개발사업 면적", "자연재해대책법 시행령 [별표 1]", "별표 ※"),
+    "dis_l":       (10, "km", 9, "재해영향평가", "개발사업 길이", "시행령 [별표 1]", "별표 ※"),
+    "dis_sa":      (5000, "m²", 9, "소규모 재해영향평가", "개발사업 면적", "시행령 [별표 1]", "별표 ※"),
+    "dis_sl":      (2, "km", 9, "소규모 재해영향평가", "개발사업 길이", "시행령 [별표 1]", "별표 ※"),
+    "trf_cargo":   (150, "만 톤", 10, "교통영향평가", "항만 연간 하역능력", "도시교통정비 촉진법 시행령 [별표 1] 라목", "별표 ※"),
+    "en_pub_toe":  (2500, "TOE", 12, "에너지사용계획", "공공 : 연료 · 열 연간", "에너지이용 합리화법 시행령 제20조", "조문 ✔"),
+    "en_pub_kwh":  (1000, "만 kWh", 12, "에너지사용계획", "공공 : 전력 연간", "시행령 제20조", "조문 ✔"),
+    "en_prv_toe":  (5000, "TOE", 12, "에너지사용계획", "민간 : 연료 · 열 연간", "시행령 제20조", "조문 ✔"),
+    "en_prv_kwh":  (2000, "만 kWh", 12, "에너지사용계획", "민간 : 전력 연간", "시행령 제20조", "조문 ✔"),
+    "ug_big":      (20, "m", 13, "지하안전평가", "굴착깊이", "지하안전관리에 관한 특별법 제14조", "조문 ✔"),
+    "ug_small":    (10, "m", 13, "소규모 지하안전평가", "굴착깊이", "같은 법 제23조 · 시행령 제23조", "조문 ✔"),
+    "saf_exc":     (10, "m", 14, "안전관리계획", "지하 굴착깊이", "건설기술 진흥법 시행령 제98조", "조문 ✔"),
+    "haz_exc":     (10, "m", 15, "유해 · 위험방지계획서", "굴착깊이", "산업안전보건법 시행령 제42조", "별표 ※"),
+    "haz_hgt":     (31, "m", 15, "유해 · 위험방지계획서", "지상 높이", "시행령 제42조", "별표 ※"),
+    "haz_span":    (50, "m", 15, "유해 · 위험방지계획서", "교량 최대 지간", "시행령 제42조", "별표 ※"),
+    "mts_ship":    (100, "m", 16, "해상교통안전진단", "이용 선박 길이 (계류시설)", "해상교통안전법 시행령 (대상사업 범위)", "종전 ※"),
+    "mts_len":     (200, "m", 16, "해상교통안전진단", "시설물 점용 · 매립 수역 길이", "같은 시행령", "종전 ※"),
+    "mts_area":    (20000, "m²", 16, "해상교통안전진단", "시설물 점용 · 매립 수역 면적", "같은 시행령", "종전 ※"),
+    "mts_depth":   (4, "m", 16, "해상교통안전진단", "제외 : 수심 미만 수역", "같은 시행령", "종전 ※"),
+    "heri_area":   (30000, "m²", 19, "매장유산 지표조사", "건설공사 사업면적", "매장유산법 시행령 (대상 규모)", "별표 ※"),
+    "ve_cost":     (100, "억원", 21, "설계의 경제성 검토", "총공사비", "건설기술 진흥법 시행령 제75조", "조문 ✔"),
+    "ls_urban":    (30000, "m²", 22, "경관심의", "개발사업 : 도시지역", "경관법 시행령 제19조", "조문 ✔"),
+    "ls_rural":    (300000, "m²", 22, "경관심의", "개발사업 : 도시지역 외", "경관법 시행령 제19조", "조문 ✔"),
+    "ls_road":     (500, "억원", 22, "경관심의", "도로 총사업비", "경관법 시행령 제18조", "조문 ✔"),
+}
+# [별표 4] 소규모 환경영향평가 — 용도지역별 사업계획 면적 (m²)
+SMALL_ZONE = {"해당 없음 (보전용도지역 아님)": None, "보전관리지역": 5000, "생산관리지역": 7500, "계획관리지역": 10000,
+              "농림지역": 7500, "자연환경보전지역": 5000, "개발제한구역": 5000}
+for _zk, _zv in SMALL_ZONE.items():
+    if _zv:
+        SCOPE_TH[f"small_{_zk}"] = (_zv, "m²", 3, "소규모 환경영향평가", f"{_zk} 사업계획 면적", "환경영향평가법 시행령 [별표 4]", "별표 ※")
+SCOPE_TODO = [  # 판정에 아직 넣지 않은 것 — 원문 확인 필요
+    ("2 · 5", "외곽시설 길이를 방파제 · 호안 '가장 긴 것' 으로 볼지 '합산' 으로 볼지", "지금 : 가장 긴 것으로 판정, 합산이면 넘는 경우 '◐ 해당 가능' 으로 표시"),
+    ("5", "해양이용영향평가법(2026.9.18 시행) 시행령 [별표 1 · 2] 신법 수치", "지금 : 종전 해양환경관리법 시행령 [별표 15 · 16] 수치로 판정"),
+    ("2 · 3", "같은 사업자 연접 개발 · 단계 사업의 규모 합산 규정", "지금 : 판정에 넣지 않음 (입력한 규모만)"),
+    ("2", "재협의 '최소 평가대상 규모 이상 증가' 의 규모 정의 (면적 · 길이)", "지금 : 사업면적 증가 ≥ 15만 m² 또는 외곽 길이 증가 ≥ 300 m"),
+]
+
+
+def _th(k):
+    return SCOPE_TH[k][0]
+
+
+def scope_th_df():
+    return pd.DataFrame([{"번호": v[2], "인허가": v[3], "항목": v[4], "기준값": f"{v[0]:,} {v[1]}", "근거": v[5], "확인": v[6]}
+                         for v in SCOPE_TH.values()]).sort_values("번호", kind="stable")
+
+
 SCOPE_UNITS = {"방파제": "m", "호안 (외곽·투기장 호안)": "m", "안벽": "m", "잔교": "m", "물양장": "m", "계류시설 (부잔교·돌핀 등)": "개소",
                "준설": "m³", "준설토 투기장": "m²", "공유수면 매립 (부지 조성)": "m²", "항로·박지 신설·변경": "m²",
                "배후부지·육상 부지조성": "m²", "건축물 (터미널·창고 등)": "m² (연면적)", "해상교량·해저케이블·터널": "m", "진입도로": "km",
@@ -4618,7 +4707,8 @@ with st.expander("📝 1. 사업 개요 · 입지 · 설계 대상 시설 입력
     sc_loc = c6.radio("공사 위치", ["해역", "해역 + 육역", "육역"], horizontal=True, key=f"sc_loc_{_pk}")
     c7, c8, c9, c10 = st.columns(4)
     sc_urban = c7.checkbox("도시지역 (국토계획법)", value=bool(_pdf.get("urban", False)), key=f"sc_urb_{_pk}")
-    sc_cons = c8.checkbox("보전지역·보호구역 포함", value=False, key=f"sc_cons_{_pk}")
+    sc_cons = c8.checkbox("보호구역 포함 (해양보호구역 · 습지보호지역 등)", value=False, key=f"sc_cons_{_pk}",
+                          help="자연환경보전법 · 습지보전법 등 보호지역 — 소규모 환경영향평가 [별표 4] 보호지역 기준 확인 (용도지역은 아래 칸)")
     sc_heri = c9.checkbox("지정 문화유산 주변", value=bool(_pdf.get("heri", False)), key=f"sc_heri_{_pk}")
     sc_fish = c10.checkbox("어업권·양식장 인접", value=bool(_pdf.get("fish", True)), key=f"sc_fish_{_pk}")
     d1, d2, d3, d4 = st.columns(4)
@@ -4636,6 +4726,28 @@ with st.expander("📝 1. 사업 개요 · 입지 · 설계 대상 시설 입력
     sc_ship = f2.number_input("최대 이용 선박 길이 (m)", value=0.0, step=10.0, min_value=0.0, key=f"sc_ship_{_pk}", help="해상교통안전진단 : 100m 이상 선박 계류시설")
     sc_redev = f3.checkbox("항만재개발사업", value=False, key=f"sc_redev_{_pk}")
     sc_maint = f4.checkbox("유지준설 (항로·정박지 유지)", value=False, key=f"sc_maint_{_pk}", help="환경영향평가·해양이용 준설 기준에서 제외")
+    # [2026-11-06] 규모 판정 보강 입력
+    g1, g2, g3, g4 = st.columns(4)
+    sc_zone = g1.selectbox("용도지역 (육상 사업 부지)", list(SMALL_ZONE), index=0, key=f"sc_zone_{_pk}",
+                           help="소규모 환경영향평가 [별표 4] 용도지역별 면적 : 보전관리 5천 · 생산관리 7,500 · 계획관리 1만 · 농림 7,500 · "
+                                "자연환경보전 5천 · 개발제한구역 5천 m² 이상 (사업면적과 비교). 자연환경보전지역 매립은 [별표 3] 제10호 3만 m² 기준")
+    sc_dred_a = g2.number_input("준설 면적 (m²)", value=0.0, step=1000.0, min_value=0.0, key=f"sc_dreda_{_pk}",
+                                help="환경영향평가 준설면적 10만 m² · 해양이용협의 준설면적 기준 (유지준설은 제외). 0 = 미입력")
+    sc_occ = g3.number_input("공유수면 점용·사용 면적 (m², 매립 제외)", value=0.0, step=1000.0, min_value=0.0, key=f"sc_occ_{_pk}",
+                             help="일반 해양이용협의 점용 3천 m² · 해상교통안전진단 수역 면적 2만 m² 기준. 0 = 미입력")
+    sc_shallow = g4.checkbox(f"시설 수역 수심 {SCOPE_TH['mts_depth'][0]} m 미만", value=False, key=f"sc_shal_{_pk}",
+                             help="해상교통안전진단 : 수심 4m 미만 수역의 시설물 · 교량은 대상에서 제외")
+    sc_chg = st.checkbox("🔁 변경 · 증설 사업 (기존 사업의 환경영향평가 · 해양이용협의 협의 완료)", value=False, key=f"sc_chg_{_pk}",
+                         help="재협의 (환경영향평가법 시행령 제54조 · 해양이용영향평가법 시행령 제17조) · 변경협의 (시행령 제55조) 판정")
+    sc_area0, sc_outer0, sc_5y, sc_7y = 0.0, 0.0, False, False
+    if sc_chg:
+        h1, h2, h3, h4 = st.columns(4)
+        sc_area0 = h1.number_input("기 협의 사업면적 (m²)", value=0.0, step=1000.0, min_value=0.0, key=f"sc_area0_{_pk}",
+                                   help="위 '사업면적' 은 변경 후 전체 면적으로 넣으십시오")
+        sc_outer0 = h2.number_input("기 협의 외곽시설 길이 (m)", value=0.0, step=10.0, min_value=0.0, key=f"sc_outer0_{_pk}",
+                                    help="아래 방파제 · 호안 규모는 변경 후 전체 길이로 넣으십시오")
+        sc_5y = h3.checkbox("협의 후 5년 이내 미착공", value=False, key=f"sc_5y_{_pk}")
+        sc_7y = h4.checkbox("7년 이상 공사중지 후 재개", value=False, key=f"sc_7y_{_pk}")
     st.markdown("**설계 대상 시설 선택** — 선택한 시설의 규모 입력란이 아래에 나타납니다")
     _def = list(_pdf["facs"].keys()) if _pdf.get("facs") else ["방파제", "안벽", "준설"]
     sc_sel = st.multiselect("설계 대상 시설", list(SCOPE_UNITS), default=_def, key=f"sc_sel_{_pk}", label_visibility="collapsed")
@@ -4675,115 +4787,234 @@ def analyze_scope():
     port_dev = any(sel(k) for k in ("방파제", "안벽", "잔교", "물양장", "계류시설 (부잔교·돌핀 등)", "항로·박지 신설·변경", "호안 (외곽·투기장 호안)"))
     plan = sc_stage.startswith("상위계획")
     R = []
+    CMP = []                                  # [2026-11-06] (번호, 항목, 값, 기준, 단위) — 기준 근접 표시용
+    T = _th
 
     def add(no, name, mark, why, agency, period, phase):
         R.append({"번호": no, "인허가": name, "판정": mark, "판정 사유": why, "협의·허가기관": agency, "법정 기간": period, "시기": phase})
+
+    def c_(no, label, v, k):
+        """기준 비교 한 줄 'label v ≥ t' + 근접 목록 등록"""
+        t, u = SCOPE_TH[k][0], SCOPE_TH[k][1]
+        CMP.append((no, label, v, t, u))
+        return f"{label} {v:,.0f} {u} {'≥' if v >= t else '<'} {t:,} {u}"
 
     F, P, N = "● 필수", "◐ 해당 가능", "○ 해당 없음"
     add(1, "전략환경영향평가", P if plan else N,
         "항만기본계획 등 상위계획 수립·변경 단계 — 시행령 별표 2 대상계획 확인" if plan else "설계 단계 (상위계획에서 기 이행 여부만 확인)",
         "기후에너지환경부(환경청)", "30일 (연장 40일)", "계획")
     # [별표 3] 제4호 항만의 건설 · 제10호 공유수면 매립 (행정규칙집 수록 기준)
-    outer = max(val("방파제"), val("호안 (외곽·투기장 호안)"))
+    bw, rv = val("방파제"), val("호안 (외곽·투기장 호안)")
+    outer, outer_sum = max(bw, rv), bw + rv
     dred_m3 = 0.0 if sc_maint else val("준설")
+    dred_a = 0.0 if (sc_maint or not sel("준설")) else float(sc_dred_a)
     recl_only = val("공유수면 매립 (부지 조성)")
-    hits = []
-    if outer >= 300: hits.append(f"외곽시설 {outer:,.0f}m ≥ 300m")
-    if recl >= 30000 and (port_dev or sc_port != "기타 (항만구역 외)"): hits.append(f"항만시설 매립 {recl:,.0f}m² ≥ 3만m²")
-    if not recl and port_dev and sc_area >= 150000: hits.append(f"그 밖의 항만시설 사업면적 {sc_area:,.0f}m² ≥ 15만m²")
-    if dred_m3 >= 200000: hits.append(f"준설량 {dred_m3:,.0f}m³ ≥ 20만m³")
-    if sc_redev and sc_area >= 300000: hits.append(f"항만재개발 {sc_area:,.0f}m² ≥ 30만m²")
-    if recl_only >= (30000 if sc_port in ("무역항", "연안항") or sc_cons else 300000): hits.append(f"공유수면 매립 {recl_only:,.0f}m² (별표 3 제10호)")
+    hits, miss, maybe = [], [], []
+
+    def chk(cond_on, label, v, k, sink=None):
+        if not cond_on:
+            return
+        t_ = c_(2, label, v, k)
+        (hits if v >= T(k) else (sink if sink is not None else miss)).append(t_)
+    chk(outer > 0, "외곽시설 길이 (가장 긴 것)", outer, "eia_outer")
+    if outer < T("eia_outer") <= outer_sum:
+        maybe.append(f"방파제 + 호안 합산 {outer_sum:,.0f} m ≥ {T('eia_outer'):,} m — 합산 기준이면 대상 (※ 원문 확인 필요)")
+    chk(recl > 0 and (port_dev or sc_port != "기타 (항만구역 외)"), "항만시설 매립", recl, "eia_recl")
+    chk(not recl and port_dev and sc_area > 0, "그 밖의 항만시설 사업면적", sc_area, "eia_area")
+    chk(sel("준설") and not sc_maint and dred_a > 0, "준설 면적", dred_a, "eia_dred_a")
+    chk(sel("준설") and not sc_maint, "준설량", dred_m3, "eia_dred_v")
+    chk(sc_redev, "항만재개발 사업면적", sc_area, "eia_redev")
+    _r10 = "eia_r10_p" if (sc_port in ("무역항", "연안항") or sc_zone == "자연환경보전지역") else "eia_r10_o"
+    chk(recl_only > 0, "공유수면 매립 ([별표 3] 제10호, " + ("무역항·연안항·자연환경보전지역" if _r10 == "eia_r10_p" else "그 밖의 지역") + ")",
+        recl_only, _r10)
+    if recl_only > 0 and _r10 == "eia_r10_o" and sc_cons and recl_only >= T("eia_r10_p"):
+        maybe.append(f"매립 {recl_only:,.0f} m² — 보호구역이 자연환경보전지역이면 3만 m² 기준 (용도지역 확인)")
+    _dnote = " · 준설 면적 미입력 (면적 10만 m² 기준 확인)" if (sel("준설") and not sc_maint and dred_a <= 0) else ""
     eia_t = (sea_works and (port_dev or recl > 0 or sel("준설"))) or (land and sc_area > 0)
-    m2 = F if hits else (P if eia_t else N)
-    add(2, "환경영향평가", m2,
-        ("[별표 3] 기준 충족 : " + ", ".join(hits)) if hits else
-        ("항만건설 유형이나 [별표 3] 규모 미만으로 판단 (외곽 300m, 매립 3만m², 사업면적 15만m², 준설 10만m²·20만m³ 기준) — 준설면적 등 추가 확인" if eia_t else "대상 유형 아님"),
-        "기후에너지환경부(환경청)", "45일 (연장 60일)", "기본설계")
-    add(3, "소규모 환경영향평가", P if (sc_cons and m2 != F) else N,
-        "보전용도지역 내 개발 — [별표 4] 보전관리 5천 · 생산관리 7,500 · 계획관리 1만 · 농림 7,500 · 자연환경보전 5천m² 이상 확인" if (sc_cons and m2 != F) else "보전지역 미포함 또는 환경영향평가 대상",
-        "지방·유역환경청", "30일 (연장 40일)", "기본설계")
+    if sc_chg:                                 # [2026-11-06] 변경 · 증설 사업 : 재협의 · 변경협의
+        _ra = (sc_area - sc_area0) / sc_area0 * 100 if sc_area0 > 0 else 0.0
+        _ro = (outer - sc_outer0) / sc_outer0 * 100 if sc_outer0 > 0 else 0.0
+        _rr = max(_ra, _ro)
+        _rt = f"증가율 면적 {_ra:,.1f} % · 외곽 길이 {_ro:,.1f} %"
+        _big = (sc_area0 > 0 and (sc_area - sc_area0) >= T("eia_area")) or (sc_outer0 > 0 and (outer - sc_outer0) >= T("eia_outer"))
+        CMP[:] = [c for c in CMP if c[0] != 2]       # 변경 사업 : 신규 기준 근접은 표시하지 않음
+        if sc_5y or sc_7y or _rr >= T("eia_re") or _big:
+            m2 = F
+            w2 = ("재협의 (시행령 제54조) : " + ", ".join(x for x, ok in (("협의 후 5년 이내 미착공", sc_5y), ("7년 이상 공사중지 후 재개", sc_7y),
+                                                                          (f"{_rt} — 최대 {_rr:,.1f} % ≥ {T('eia_re')} %", _rr >= T("eia_re")),
+                                                                          ("증가 규모가 최소 평가대상 규모 이상 (※ 규모 정의 원문 확인)", _big)) if ok))
+        elif _rr >= T("eia_mod"):
+            m2, w2 = F, f"변경협의 (시행령 제55조) : {_rt} — 최대 {_rr:,.1f} % ≥ {T('eia_mod')} %"
+        else:
+            m2, w2 = P, f"변경 규모 작음 ({_rt} < {T('eia_mod')} %) — 부지면적 15 % 이상 토지이용계획 변경 등 변경협의 사유 확인 (시행령 제55조)"
+        CMP.append((2, "변경 규모 증가율 (재협의)", _rr, T("eia_re"), "%"))
+    elif hits:
+        m2, w2 = F, "[별표 3] 기준 충족 : " + ", ".join(hits)
+    elif maybe:
+        m2, w2 = P, "; ".join(maybe) + (" / 그 밖 : " + "; ".join(miss) if miss else "") + _dnote
+    elif eia_t and not (sea_works and (port_dev or recl > 0 or sel("준설"))):
+        m2, w2 = P, "육상 개발 — [별표 3] 해당 분야 (산업단지 · 도시 개발 · 물류시설 등) 사업면적 기준 확인" + (f" (사업면적 {sc_area:,.0f} m²)" if sc_area else "")
+    elif eia_t:
+        m2, w2 = P, ("항만건설 유형이나 [별표 3] 규모 미만 : " + ("; ".join(miss) if miss else ("유지준설 → 준설 기준 제외 ([별표 3] 제4호 다목)"
+                                                                                        if (sc_maint and sel("준설")) else "규모 미입력")) + _dnote
+                     + " — 연접 · 단계 사업 합산 여부 확인")
+    else:
+        m2, w2 = N, "대상 유형 아님"
+    add(2, "환경영향평가", m2, w2, "기후에너지환경부(환경청)", "45일 (연장 60일)", "기본설계")
+    _T3 = SMALL_ZONE.get(sc_zone)
+    if m2 == F:
+        m3, w3 = N, "환경영향평가 대상 → 소규모 환경영향평가 대상 아님 (법 제43조①)"
+    elif _T3:
+        _t3 = c_(3, f"{sc_zone} 사업면적", sc_area, f"small_{sc_zone}")
+        if sc_area >= _T3:
+            m3 = F if m2 == N else P
+            w3 = f"[별표 4] {_t3}" + (" — 환경영향평가 대상이 아니면 소규모 대상" if m3 == P else "")
+        else:
+            m3, w3 = N, f"[별표 4] {_t3}"
+    elif sc_cons:
+        m3, w3 = P, "보호구역 포함 — 자연환경보전법 · 습지보전법 등 보호지역 [별표 4] 기준 확인 (용도지역을 고르면 면적으로 판정)"
+    else:
+        m3, w3 = N, "보전용도지역 · 보호구역 아님"
+    add(3, "소규모 환경영향평가", m3, w3, "지방·유역환경청", "30일 (연장 40일)", "기본설계")
     add(4, "기후변화영향평가", P if m2 != N or plan else N, "전략·환경영향평가 대상 중 탄소중립기본법 시행령 대상이면 병행 실시",
         "기후에너지환경부", "환경영향평가 협의기간 내", "기본설계")
-    add(5, "해양이용협의 / 해양이용영향평가", F if sea_works else N,
-        "공유수면 점용·사용·매립·준설 → 일반 해양이용협의 이상 필수, 규모에 따라 해양이용영향평가 (해양이용영향평가법 시행령 별표 1·2)" if sea_works else "해역 공사 없음",
-        "해양수산부(지방해양수산청)", "일반 30일 / 영향평가 45일", "기본·실시설계")
+    # [2026-11-06] 해양이용협의 구분 (종전 해양환경관리법 시행령 별표 15 · 16 수치 — 신법 별표 1 · 2 원문 확인 필요)
+    _old = " (※ 종전 별표 15 · 16 수치 — 신법 시행령 별표 1 · 2 원문 확인 필요)"
+    if not sea_works:
+        m5, w5, p5 = N, "해역 공사 없음", "일반 30일 / 영향평가 45일"
+    elif sc_chg:
+        _mr = max((max(sc_area, 0) - sc_area0) / sc_area0 * 100 if sc_area0 > 0 else 0.0,
+                  (outer - sc_outer0) / sc_outer0 * 100 if sc_outer0 > 0 else 0.0)
+        if sc_7y or _mr >= T("mar_re"):
+            m5, w5 = F, ("재협의 (시행령 제17조) : " + ("7년 이상 중지 후 재개" if sc_7y else f"면적 · 길이 증가 {_mr:,.1f} % ≥ {T('mar_re')} %"))
+        else:
+            m5, w5 = P, f"면적 · 길이 증가 {_mr:,.1f} % < {T('mar_re')} % — 재협의 아님, 새 점용 · 사용 면허등이 있으면 그 협의 확인"
+        p5 = "일반 30일 / 영향평가 45일"
+    else:
+        ia, gen, low = [], [], []
+        for lab, v, k, sink in (("준설 면적", dred_a, "mar_ia_da", ia), ("준설량", dred_m3, "mar_ia_dv", ia)):
+            if sel("준설") and not sc_maint and v > 0:
+                (sink if v >= T(k) else low).append(c_(5, lab, v, k))
+        _len5 = max(val("방파제"), val("호안 (외곽·투기장 호안)"), val("안벽"), val("잔교"), val("물양장"))
+        if recl > 0:
+            gen.append(f"매립 {recl:,.0f} m² (바다 · 바닷가 매립은 규모 무관)")
+        for lab, v, k, on in (("계류 · 외곽시설 길이", _len5, "mar_g_len", _len5 > 0), ("점용 · 사용 면적", sc_occ, "mar_g_occ", sc_occ > 0),
+                              ("준설 면적", dred_a, "mar_g_da", sel("준설") and not sc_maint and dred_a > 0),
+                              ("준설량", dred_m3, "mar_g_dv", sel("준설") and not sc_maint and dred_m3 > 0)):
+            if on and not (ia and k in ("mar_g_da", "mar_g_dv")):
+                (gen if v >= T(k) else low).append(c_(5, lab, v, k))
+        if ia:
+            m5, w5, p5 = F, "해양이용영향평가 : " + ", ".join(ia) + _old, "영향평가 45일"
+        elif gen:
+            m5, w5, p5 = F, "일반 해양이용협의 : " + ", ".join(gen) + (" (영향평가 미만 : " + "; ".join(low) + ")" if low else "") + _old, "일반 30일"
+        else:
+            m5 = F
+            w5 = ("해양이용협의 (공유수면 점용 · 사용) — 일반 협의 규모 미만 : " + ("; ".join(low) if low else "규모 미입력")
+                  + " → 해양 영향 경미 사업이면 검토기관 의견 청취 생략 가능 (법 제12조② 단서)"
+                  + ("" if sc_occ > 0 else " · 점용 · 사용 면적을 넣으면 더 정확") + _old)
+            p5 = "일반 30일"
+    add(5, "해양이용협의 / 해양이용영향평가", m5, w5, "해양수산부(지방해양수산청)", p5, "기본·실시설계")
     add(6, "해양환경영향조사", P if sea_works else N, "해양이용협의·영향평가 처분 후 조사 (해양수산부령 대상·기간)", "해양수산부", "-", "시공 중")
     add(7, "해양공간적합성협의", F if (plan and loc_sea) else (P if sea_works else N),
         "해양 이용·개발계획 수립·변경 / 지구 지정 시 다른 절차보다 먼저 요청" if plan else "상위계획(항만기본계획 등)에서 기 협의 여부 확인 — 변경 시 협의",
         "해양수산부", "45일 (재협의 20일)", "계획")
     if sea_works:
-        why8 = "해역 구조물 설치·준설 → 공유수면 점용·사용허가"
+        why8 = "해역 구조물 설치·준설 → 공유수면 점용·사용허가" + (f" ({sc_occ:,.0f} m²)" if sc_occ > 0 else "")
         if recl > 0:
             why8 += f" / 매립 {recl:,.0f} m² → 매립기본계획 반영 + 매립면허 ({'해양수산부장관' if recl >= 100000 else '시·도지사'})"
         add(8, "공유수면 점용·사용허가 / 매립면허", F, why8, "공유수면관리청 · 면허관청", "관계기관 의견 20일", "실시설계")
     else:
         add(8, "공유수면 점용·사용허가 / 매립면허", N, "해역 공사 없음", "-", "-", "-")
-    _len = val("진입도로") * 1000
+    _km = val("진입도로")
     if plan:
         m9, w9 = F, "행정계획(항만기본계획·매립기본계획 등) → 재해영향성검토 (규모 무관)"
-    elif sc_area >= 50000 or _len >= 10000:
-        m9, w9 = F, f"항만개발사업 실시계획 — 면적 {sc_area:,.0f}m² ≥ 5만m² 또는 길이 10km 이상 → 재해영향평가 (45일)"
-    elif sc_area >= 5000 or _len >= 2000:
-        m9, w9 = F, f"면적 {sc_area:,.0f}m² (5천~5만m²) 또는 길이 2~10km → 소규모 재해영향평가 (30일)"
+    elif sc_area >= T("dis_a") or _km >= T("dis_l"):
+        m9, w9 = F, f"항만개발사업 실시계획 — {c_(9, '면적', sc_area, 'dis_a')}" + (f" / {c_(9, '길이', _km, 'dis_l')}" if _km else "") + " → 재해영향평가 (45일)"
+    elif sc_area >= T("dis_sa") or _km >= T("dis_sl"):
+        m9, w9 = F, f"{c_(9, '면적', sc_area, 'dis_a')} · {c_(9, '면적', sc_area, 'dis_sa')}" + (f" / 길이 {_km:,.1f} km" if _km else "") + " → 소규모 재해영향평가 (30일)"
     else:
-        m9, w9 = N, "면적 5천m² · 길이 2km 미만"
+        m9, w9 = N, c_(9, "면적", sc_area, "dis_sa") + (f" · {c_(9, '길이', _km, 'dis_sl')}" if _km else "")
     add(9, "재해영향평가 (재해영향성검토)", m9, w9,
         "행정안전부 · 시·도", "45일 / 30일 (연장 10일)", "기본설계")
-    _m10 = F if sc_cargo >= 150 else (P if (land and (sel("배후부지·육상 부지조성") or sel("건축물 (터미널·창고 등)") or sel("진입도로"))) else N)
+    _m10 = F if sc_cargo >= T("trf_cargo") else (P if (land and (sel("배후부지·육상 부지조성") or sel("건축물 (터미널·창고 등)") or sel("진입도로"))) else N)
+    _t10 = c_(10, "연간 하역능력", sc_cargo, "trf_cargo") if sc_cargo > 0 else ""
     add(10, "교통영향평가", _m10,
-        f"항만의 건설 : 연간 하역능력 {sc_cargo:,.0f}만 톤 ≥ 150만 톤 (도시교통정비지역·교통권역 내)" if _m10 == F else
-        "배후단지·건축물·도로 — [별표 1] 규모 확인 (항만 : 하역능력 150만 톤)", "승인관청 (심의위원회)", "심의 (이의신청 30/60일)", "기본설계")
+        f"항만의 건설 : {_t10} (도시교통정비지역·교통권역 내)" if _m10 == F else
+        "배후단지·건축물·도로 — [별표 1] 규모 확인 (항만 : 하역능력 150만 톤)" + (f" · {_t10}" if _t10 else ""), "승인관청 (심의위원회)", "심의 (이의신청 30/60일)", "기본설계")
     add(11, "도시·군계획시설 결정", P if (land and sc_urban) else N, "도시지역 내 기반시설(항만·도로 등) 설치 시 도시관리계획 결정 확인",
         "시·도지사 등", "관계기관 협의 30일", "계획·기본설계")
-    t_pub, t_prv = (2500, 1000) if sc_owner == "공공" else (5000, 2000)
+    _kt, _kk = ("en_pub_toe", "en_pub_kwh") if sc_owner == "공공" else ("en_prv_toe", "en_prv_kwh")
+    t_pub, t_prv = T(_kt), T(_kk)
     if sc_toe >= t_pub or sc_kwh >= t_prv:
-        m12, w12 = F, f"연간 {sc_toe:,.0f} TOE / {sc_kwh:,.0f}만 kWh ≥ 기준 ({sc_owner} {t_pub:,} TOE / {t_prv:,}만 kWh)"
+        m12, w12 = F, f"{c_(12, '연료·열', sc_toe, _kt)} / {c_(12, '전력', sc_kwh, _kk)} ({sc_owner} 기준)"
     elif sc_toe == 0 and sc_kwh == 0:
         m12, w12 = P, f"항만건설 대상 사업 — 에너지 사용량 확정 후 판정 ({sc_owner} 기준 {t_pub:,} TOE / {t_prv:,}만 kWh)"
     else:
-        m12, w12 = N, f"사용량 기준 미만 ({sc_owner} {t_pub:,} TOE / {t_prv:,}만 kWh)"
+        m12, w12 = N, f"{c_(12, '연료·열', sc_toe, _kt)} / {c_(12, '전력', sc_kwh, _kk)} ({sc_owner} 기준 미만)"
     add(12, "에너지사용계획 협의", m12, w12, "기후에너지환경부 (에너지공단)", "30일 (연장 20일)", "기본설계")
-    m13 = F if sc_exc >= 10 else N
-    add(13, "지하안전평가", m13, ("굴착 20m 이상 → 지하안전평가" if sc_exc >= 20 else ("굴착 10~20m → 소규모 지하안전평가" if sc_exc >= 10 else "굴착 10m 미만")),
+    m13 = F if sc_exc >= T("ug_small") else N
+    _t13 = c_(13, "굴착", sc_exc, "ug_big" if sc_exc >= T("ug_small") else "ug_small") if sc_exc > 0 else "굴착 없음"
+    add(13, "지하안전평가", m13, (f"{_t13} → 지하안전평가" if sc_exc >= T("ug_big") else (f"{_t13} → 소규모 지하안전평가" if sc_exc >= T("ug_small") else _t13)),
         "국토교통부 (지방국토관리청)", "30일 (연장 50일)", "실시설계")
-    m14 = F if (sc_cls or sc_exc >= 10) else P
+    m14 = F if (sc_cls or sc_exc >= T("saf_exc")) else P
     add(14, "설계안전성 검토 · 안전관리계획", m14, "1·2종 시설물 또는 굴착 10m 이상 → 안전관리계획(착공 전), 실시설계 시 설계안전성 검토" if m14 == F else "안전관리계획 대상 여부 확인 (시행령 제98조)",
         "발주청 · 국토안전관리원", "검토 20일", "실시설계·착공 전")
-    m15 = F if (sc_exc >= 10 or sc_hgt >= 31 or sc_span >= 50) else N
-    add(15, "유해·위험방지계획서", m15, "굴착 10m 이상 / 높이 31m 이상 / 최대지간 50m 이상 교량 중 해당" if m15 == F else "기준 미해당",
+    m15 = F if (sc_exc >= T("haz_exc") or sc_hgt >= T("haz_hgt") or sc_span >= T("haz_span")) else N
+    _t15 = [c_(15, lb, v, k) for lb, v, k in (("굴착", sc_exc, "haz_exc"), ("높이", sc_hgt, "haz_hgt"), ("교량 지간", sc_span, "haz_span")) if v > 0]
+    add(15, "유해·위험방지계획서", m15, (" / ".join(_t15) if _t15 else "굴착 · 높이 · 지간 입력 없음") + (" → 해당" if m15 == F else " — 기준 미해당"),
         "한국산업안전보건공단", "심사 15일", "착공 전날까지")
-    _w16 = []
-    if sc_ship >= 100 and port_dev: _w16.append(f"길이 {sc_ship:,.0f}m ≥ 100m 선박 계류시설")
-    _l16 = max(val("방파제"), val("안벽"), val("잔교"), val("호안 (외곽·투기장 호안)"))
-    if _l16 >= 200 or recl >= 20000: _w16.append(f"시설물 수역 길이 {_l16:,.0f}m ≥ 200m 또는 면적 ≥ 2만m²")
-    if sel("해상교량·해저케이블·터널"): _w16.append("수역 내 교량·터널·케이블")
+    _w16, _x16 = [], []
+    if sc_ship >= T("mts_ship") and port_dev: _w16.append(c_(16, "계류시설 이용 선박 길이", sc_ship, "mts_ship"))
+    elif sc_ship > 0 and port_dev: _x16.append(c_(16, "선박 길이", sc_ship, "mts_ship"))
+    _l16 = max(val("방파제"), val("안벽"), val("잔교"), val("물양장"), val("호안 (외곽·투기장 호안)"))
+    _a16 = max(recl, float(sc_occ))
+    if not sc_shallow:
+        if _l16 >= T("mts_len") or _a16 >= T("mts_area"):
+            _w16.append(c_(16, "시설물 수역 길이", _l16, "mts_len") + " 또는 " + c_(16, "점용·매립 면적", _a16, "mts_area"))
+        elif _l16 > 0 or _a16 > 0:
+            _x16.append(c_(16, "수역 길이", _l16, "mts_len") + " · " + c_(16, "면적", _a16, "mts_area"))
+        if sel("해상교량·해저케이블·터널"): _w16.append("수역 내 교량·터널·케이블")
+    else:
+        _x16.append(f"수심 {T('mts_depth')} m 미만 수역 → 시설물 · 교량 규모 기준 제외")
     if sel("항로·박지 신설·변경"): _w16.append("항로·정박지 지정·변경")
     m16 = F if (_w16 and loc_sea) else (P if (port_dev and loc_sea) else N)
-    add(16, "해상교통안전진단", m16, ("; ".join(_w16) + " (수심 4m 미만 수역 제외)") if m16 == F else
-        ("항만시설 — 규모 기준(선박 100m, 수역 200m·2만m²) 미만 여부 확인" if m16 == P else "대상 사업 없음"),
+    add(16, "해상교통안전진단", m16, ("; ".join(_w16) + ("" if sc_shallow else " (수심 4m 미만 수역 제외)")) if m16 == F else
+        ("항만시설 — " + ("; ".join(_x16) if _x16 else "규모 기준(선박 100m, 수역 200m·2만m²) 미입력") + " — 제출 불필요 의견서 여부 확인" if m16 == P else "대상 사업 없음"),
         "해양수산부", "검토 45일", "기본설계")
     add(17, "해상풍력 인허가 (해상풍력법)", F if sel("해상풍력발전") else N, "해상풍력 발전사업 — 발전지구·실시계획 승인" if sel("해상풍력발전") else "해당 없음",
         "해상풍력발전위원회", "관계기관 협의 30일", "계획")
     add(18, "어업피해영향조사", F if (sea_works and sc_fish) else (P if sea_works else N), "해역 공사 + 어업권·양식장 인접 → 피해조사·보상", "사업시행자 · 지자체", "-", "기본설계·시공 전")
-    add(19, "매장유산 지표조사 / 현상변경", F if (sc_area >= 30000 or sc_heri) else N,
-        f"사업면적 {sc_area:,.0f} m²" + (" ≥ 3만 m²" if sc_area >= 30000 else "") + (" / 지정 문화유산 주변 → 현상변경 허가 검토" if sc_heri else ""),
+    add(19, "매장유산 지표조사 / 현상변경", F if (sc_area >= T("heri_area") or sc_heri) else N,
+        c_(19, "사업면적", sc_area, "heri_area") + (" / 지정 문화유산 주변 → 현상변경 허가 검토" if sc_heri else ""),
         "국가유산청", "검토 30일", "기본설계")
     add(20, "수저준설토사 유효활용", P if sel("준설") else N, "준설토 성분·오염도 검사 후 유효활용·처리 방안 협의", "지방해양수산청", "-", "실시설계")
     _cost_t = f"{sc_cost:,.2f}".rstrip("0").rstrip(".")          # [2026-10-23 검증보고서 23-4] 99.99 → '100' 반올림 표시 방지
-    if sc_cost < 100:
-        m21, w21 = N, f"총공사비 {_cost_t}억원 < 100억원 (시행령 제75조)"
+    CMP.append((21, "총공사비", sc_cost, T("ve_cost"), "억원"))
+    if sc_cost < T("ve_cost"):
+        m21, w21 = N, f"총공사비 {_cost_t}억원 < {T('ve_cost')}억원 (시행령 제75조)"
     elif sc_owner == "공공":
-        m21, w21 = F, f"총공사비 {_cost_t}억원 ≥ 100억원 (시행령 제75조)"
+        m21, w21 = F, f"총공사비 {_cost_t}억원 ≥ {T('ve_cost')}억원 (시행령 제75조)"
     else:                                                        # [2026-10-23 검증보고서 23-3] 제75조는 발주청 건설공사 대상
-        m21, w21 = P, f"총공사비 {_cost_t}억원 ≥ 100억원 — 민간 사업 : 시행령 제75조는 발주청 건설공사 대상이므로 발주청 해당 여부 확인"
+        m21, w21 = P, f"총공사비 {_cost_t}억원 ≥ {T('ve_cost')}억원 — 민간 사업 : 시행령 제75조는 발주청 건설공사 대상이므로 발주청 해당 여부 확인"
     add(21, "설계의 경제성 검토 (VE)", m21, w21, "발주청", "-", "기본·실시설계")
-    lsc = (sc_urban and sc_area >= 30000) or (not sc_urban and sc_area >= 300000) or (sel("진입도로") and sc_cost >= 500)
-    add(22, "경관심의", P if lsc else N, "개발사업 면적 기준(도시 3만 / 비도시 30만 m²) 또는 도로 500억 이상 해당 — 사업 유형 별표 확인" if lsc else "면적·사업비 기준 미해당",
+    _lk = "ls_urban" if sc_urban else "ls_rural"
+    lsc = sc_area >= T(_lk) or (sel("진입도로") and sc_cost >= T("ls_road"))
+    _t22 = c_(22, "개발사업 면적 (" + ("도시" if sc_urban else "도시 외") + ")", sc_area, _lk)
+    add(22, "경관심의", P if lsc else N, (_t22 + " 또는 도로 500억 이상 — 사업 유형 별표 확인") if lsc else _t22 + " — 면적·사업비 기준 미해당",
         "경관위원회", "-", "기본설계")
     add(23, "공공디자인 심의", P if sc_owner == "공공" else N, "공공시설물 설치 — 지자체 공공디자인 조례 확인", "지자체 위원회", "-", "기본·실시설계")
     add(24, "항만공간 공공디자인 협의", P if (port_dev and sc_port != "기타 (항만구역 외)") else N, "항만시설 — 항만공간 공공디자인 가이드라인(예규) 적용", "지방해양수산청·항만공사", "-", "기본·실시설계")
-    return pd.DataFrame(R)
+    # [2026-11-06] 기준 근접 (기준의 90 % 이상 · 미만) — 설계 변경 때 대상이 될 수 있음
+    near = {}
+    for no, lab, v, t, u in CMP:
+        if t and v > 0 and 0.9 * t <= v < t:
+            near.setdefault(no, []).append(f"{lab} {v:,.0f} {u} (기준 {t:,} {u} 의 {v / t * 100:.0f} %)")
+    for r in R:
+        if r["번호"] in near:
+            r["판정 사유"] = "⚠ 기준 근접 : " + ", ".join(near[r["번호"]]) + " — " + r["판정 사유"]
+    df = pd.DataFrame(R)
+    df.attrs["near"] = near
+    return df
 
 
 # 턴키 : 번호 → (단계번호, 시기, 수행 주체)  0 = 기초조사·기본계획(발주처) / 2 = 실시설계(낙찰자) / 3 = 착공 전·시공 중
@@ -4855,8 +5086,10 @@ def scope_roadmap_png(df):
     return buf.getvalue()
 
 
-sc_df = apply_delivery(analyze_scope(), sc_tk)
+_sc_raw = analyze_scope()
+sc_df = apply_delivery(_sc_raw, sc_tk)
 sc_df.attrs["turnkey"] = sc_tk
+sc_df.attrs["near"] = _sc_raw.attrs.get("near", {})
 n_f = (sc_df["판정"] == "● 필수").sum()
 n_p = (sc_df["판정"] == "◐ 해당 가능").sum()
 st.markdown(f"#### 2. 분석 결과 — 필수 **{n_f}건** · 해당 가능 **{n_p}건** · 해당 없음 {len(sc_df) - n_f - n_p}건")
@@ -4879,6 +5112,17 @@ if sc_tk:
 only = st.checkbox("해당 없음 항목 숨기기", value=True, key="scope_hide")
 view = sc_df[sc_df["판정"] != "○ 해당 없음"] if only else sc_df
 st.markdown(kit_table(view[show_cols], wrap=True), unsafe_allow_html=True)
+if sc_df.attrs.get("near"):
+    _nn = sc_df.attrs["near"]
+    _nm_ = dict(zip(sc_df["번호"], sc_df["인허가"]))
+    st.warning("⚠ **기준 근접** (기준값의 90 % 이상 · 미만) — 설계 변경으로 규모가 조금만 늘어도 대상이 될 수 있습니다.\n\n" +
+               "\n".join(f"- {n}. {_nm_.get(n, '')} : " + ", ".join(v) for n, v in sorted(_nn.items())))
+with st.expander("📏 판정 기준표 (판정에 쓰는 기준값 · 근거 · 확인 상태)"):
+    st.caption("판정은 이 표의 값만 씁니다. 확인 : **조문 ✔** = 현행 조문 확인 / **별표 ※** = 별표 수치 (해양&항만 설계ENG 행정규칙집 수록값, "
+               "별표 원문 확인 필요) / **종전 ※** = 종전 해양환경관리법 · 해사안전법 기준 (신법 별표 원문 확인 필요)")
+    st.markdown(kit_table(scope_th_df(), wrap=True), unsafe_allow_html=True)
+    st.markdown("**판정에 아직 넣지 않은 것 (원문 확인 필요)**")
+    st.markdown(kit_table(pd.DataFrame(SCOPE_TODO, columns=["번호", "확인할 것", "지금 처리"]), wrap=True), unsafe_allow_html=True)
 _rm = scope_roadmap_png(sc_df)
 st.image(_rm, caption="인허가 로드맵 (사업 단계별 배치, 상세 절차는 아래 가이드의 '6. 절차' 흐름도 참조)", use_container_width=True)
 st.caption("※ 판정은 입력값에 따른 1차 검토 결과입니다. '해당 가능' 항목은 각 시행령 별표의 규모 기준과 관계기관 사전협의로 최종 확인하십시오. "
@@ -4887,9 +5131,14 @@ _xb = BytesIO()
 with pd.ExcelWriter(_xb, engine="openpyxl") as _w:
     pd.DataFrame([{"항목": k, "값": v} for k, v in [("사업명", sc_name), ("지역", sc_region), ("항만 구분", sc_port), ("사업 단계", sc_stage), ("발주 방식", sc_order[2:].strip()),
                                                      ("사업 주체", sc_owner), ("공사 위치", sc_loc), ("총공사비(억원)", sc_cost), ("사업면적(m²)", sc_area),
-                                                     ("최대 굴착깊이(m)", sc_exc), ("기준일", "2026.10")]]).to_excel(_w, sheet_name="사업개요", index=False)
+                                                     ("최대 굴착깊이(m)", sc_exc), ("용도지역", sc_zone), ("준설 면적(m²)", sc_dred_a),
+                                                     ("공유수면 점용·사용 면적(m²)", sc_occ), ("수심 4m 미만", "예" if sc_shallow else "아니오"),
+                                                     ("변경·증설 사업", "예" if sc_chg else "아니오")] + ([("기 협의 사업면적(m²)", sc_area0), ("기 협의 외곽 길이(m)", sc_outer0),
+                                                     ("5년 이내 미착공", "예" if sc_5y else "아니오"), ("7년 이상 공사중지 후 재개", "예" if sc_7y else "아니오")] if sc_chg else [])
+                                                    + [("기준일", "2026.11")]]).to_excel(_w, sheet_name="사업개요", index=False)
     sc_fac[sc_fac["선택"]].to_excel(_w, sheet_name="설계대상시설", index=False)
     sc_df[show_cols].to_excel(_w, sheet_name="인허가판정", index=False)
+    scope_th_df().to_excel(_w, sheet_name="판정기준표", index=False)
 st.download_button("💾 인허가 분석 결과 Excel 다운로드", data=_xb.getvalue(), file_name=f"인허가분석_{sc_name}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -5350,4 +5599,59 @@ with st.expander("24. 항만공간 공공디자인 협의"):
         st.markdown("👉 관련지침: 해양수산부 예규 ([항만공간의 공공디자인 가이드라인](https://www.law.go.kr/lsSc.do?menuId=1&query=항만공간의공공디자인가이드라인))")
 
 
-_pj_end()                    # [공통블록] 입력란 아래(또는 화면 맨 아래) 💾 · 🧾 · 📚
+# =====================================================================
+# ★ 23번 앱 사용설명서 (16번 블록식처럼 앱 화면에도 — 2026-11-02 독립 앱 요청)
+#    내용 = Home 23번 사용설명서 + 현재 화면 기준 정정 (키 입력 위치 · Secrets 키 · [cite] 표기 삭제)
+# =====================================================================
+# 개인 · 조직 통합 앱(pages/ 안)에서는 Home 에 같은 설명서가 있어 숨김 — 독립 앱 · 원본에서만 (11.02 사용자 '독립 앱만')
+if Path(__file__).resolve().parent.name != "pages":
+    st.markdown("""
+23. **인허가 (License & Permit)**: 항만 · 개발 사업의 영향평가 · 인허가 관련 법령 자동 업데이트 및 상세 가이드 프로그램 (2026.09.08 작성)
+""")
+
+    with st.expander("👉 인허가 관련 법령 자동 업데이트 대시보드 앱 사용설명서 보기"):
+        st.markdown(r"""
+    **■ 🏛️ 인허가 관련 법령 자동 업데이트 대시보드 사용자 매뉴얼**
+
+    항만 및 개발 사업에 수반되는 핵심 **영향평가 및 인허가 업무** 관련 법령들의 최신 제·개정 상태를 추적하고, 종합 보고서를 자동 생성하는 시스템입니다.
+
+    ---
+
+    ### **Ⅰ. 주요 기능 및 사용 방법**
+
+    **📍 1단계: 인허가-법령 리스트 확인 및 편집**
+    * 왼쪽 **[1. 인허가-법령 리스트]** 표에서 기본으로 짝지어진 주요 인허가 항목(전략환경영향평가, 해양이용영향평가, 재해영향평가 등)과 검색할 법령명을 확인합니다.
+    * 필요하면 새로운 인허가 항목과 정확한 법령명을 직접 추가하거나 수정할 수 있습니다.
+
+    **📍 2단계: 최신 법령 데이터 업데이트 실행**
+    * 오른쪽 **[2. 법령 업데이트 결과 대시보드]** 위의 **🔑 법제처 API 키 (OC)** 칸을 확인합니다.
+      * 칸 옆에 **'🔑 등록된 법제처 키 사용 중'** 이 보이면 칸을 비워 둔 채로 쓰면 됩니다 (관리자가 등록한 키 사용).
+      * 다른 키를 쓰려면 칸에 넣습니다 (법제처 OPEN API 승인 · 이 앱 서버 주소 등록이 된 OC).
+    * **[🚀 최신 법령 데이터 업데이트 실행]** 버튼을 누르면 법제처 서버와 통신하여 각 법령의 실제 법령명, 시행일자, 공포일자, 제개정구분, 상세링크(원문)를 자동으로 모읍니다. 법령에 없으면 행정규칙(훈령 · 예규 · 고시)에서 다시 찾습니다.
+    * 법제처가 조회를 거부하면 표에 **'⛔ 법제처 거부 : 사유'** 와 빨간 안내 상자가 나옵니다 — 키 · 등록한 서버 주소를 확인하세요.
+
+    **📍 3단계: 업데이트 결과 대시보드 확인 및 다운로드**
+    * 업데이트가 끝나면 오른쪽 화면에 각 인허가 법령의 최신 상태가 표로 정리되어 나타납니다.
+    * 결과표 아래 다운로드 버튼으로 **Excel, HTML, MS Word(.docx)** 형식의 종합 보고서를 저장할 수 있습니다.
+
+    **📍 4단계: 설계범위 기반 인허가 분석**
+    * 시설 선택 → 규모 입력 (또는 설계보고서 PDF 자동 추출) → 24개 인허가의 필수 / 해당 가능 판정, 단계별 로드맵, Excel 을 제공합니다.
+    * 판정은 입력값에 따른 1차 검토 결과입니다. '해당 가능' 항목은 각 시행령 별표의 규모 기준과 관계기관 사전협의로 최종 확인하십시오.
+
+    **📍 5단계: 설계 시행 주요 인허가 상세 가이드 열람**
+    * 화면 아래 상세 가이드에서 각 인허가의 개요, 실시근거, 대상사업 및 협의시기, 협의기관, 평가항목과 대상범위 · 근거 위치(법 → 시행령 → 별표)를 확인합니다.
+    * **6. 절차 및 양식 보기** 를 펼치면 현행 법령(2026.10 확인) 기준 절차 흐름도와 법제처 원문 링크가 포함된 법정 양식 정보를 볼 수 있습니다.
+    """)
+        st.markdown("---")
+        st.markdown("##### 🗂 상세 변경 이력")
+        st.markdown("""
+* **10.08** 화면 양식 통일 (10번 EP 기준)
+* **10.12** 현행 법령(2026.10) 기준 인허가 절차 흐름도 24개 분야 31종 신규 도식화 · 근거 법령 정정, '설계범위 기반 인허가 분석'(시설·규모 입력 또는 설계보고서 PDF 자동 추출 → 24개 인허가 판정 · 단계별 로드맵 · Excel), 항목별 대상범위 · 근거 위치 표, 발주방식(일반 / 턴키·기술제안)별 시기 · 수행 주체 구분
+* **10.20** 인허가 로드맵 그림 범례 색 구분 (■ 파랑 = 필수 · ■ 주황 = 해당 가능) · '2. 분석 결과' 판정 기준 설명 상자 · 법령 검색에 없으면 행정규칙(훈령·예규·고시)에서 다시 찾음
+* **10.23** 검증보고서 22-25번 반영 — 법령명 완전일치 항목 채택(없으면 '확인 필요'), 공사 위치 '육역'인데 해역 시설이 있으면 경고, 민간 사업 VE '해당 가능', 총공사비 소수 표시, 기후영향평가 근거 법령 = 탄소중립기본법
+* **10.30** 법제처 공용 'test' 키 거부(사용자 정보 검증 실패)에 맞춰 — 등록된 법제처 키(Secrets) 자동 사용, 조회 거부 사유를 표 · 안내 상자에 표시
+* **11.02** 앱 화면에 사용설명서 추가
+    """)
+
+
+_pj_end()                   # [공통블록] 입력란 아래(또는 화면 맨 아래) 💾 · 🧾 · 📚
