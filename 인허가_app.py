@@ -552,7 +552,7 @@ st.set_page_config(page_title="인허가 법령 자동 업데이트 시스템", 
 #   · 💾 이름표(key)가 붙은 입력란 값을 JSON 으로 저장 · 불러오기 (사이드바)
 #   · 🧾 내려받는 Excel · Word · HTML · JSON 에 '계산 정보'(프로그램 판 · 계산 일시 · 입력 지문 · 적용 기준)를 자동으로 붙임
 #   · 📚 이 앱이 인용한 KDS 조항 목록 (확정본 고시 후 점검용 — _기준점검/kds_scan.py)
-_PJ = {'app': '인허가 관련 법령 자동 업데이트', 'no': 23, 'save': True, 'keys': {'scope_mode': 'radio', 'scope_hide': 'checkbox', 'in_시스템_설정_법제처_API_키_OC_필수': 'text_input'}, 'kds': [], 'basis': '앱 화면의 근거 표기 참조', 'tables': {'tb_edited_df': None}, 'credit': '김창보 @ 다온기술', 'lib': True, 'short': None}
+_PJ = {'app': '인허가 관련 법령 자동 업데이트', 'no': 23, 'save': True, 'keys': {'scope_mode': 'radio', 'scope_hide': 'checkbox', 'sc_sch_start': 'date_input', 'sc_sch_b': 'number_input', 'sc_sch_d': 'number_input', 'sc_sch_done': 'multiselect', 'in_시스템_설정_법제처_API_키_OC_필수': 'text_input'}, 'kds': [], 'basis': '앱 화면의 근거 표기 참조', 'tables': {'tb_edited_df': None}, 'credit': '김창보 @ 다온기술', 'lib': True, 'short': None}
 _PJ_VER = "pj-10"
 
 
@@ -2452,15 +2452,117 @@ def _pj_gh_call(cfg, method, path, body=None, raw=False):
         return r.read()
 
 
+
+_PJ_PKL_MODS = ("numpy", "pandas", "datetime", "collections", "decimal", "zoneinfo", "pytz", "dateutil", "uuid", "pathlib", "fractions")
+_PJ_PKL_BUILTINS = {"list", "dict", "set", "frozenset", "tuple", "bytearray", "bytes", "slice", "complex", "range", "object",
+                    "int", "float", "str", "bool", "NoneType", "Ellipsis", "NotImplemented"}
+_PJ_PKL_BAD = ("Store", "Writer", "Reader", "File", "memmap", "IO", "Popen", "eval", "exec", "load", "read", "save", "system")
+
+
+def _pj_pkl_global_ok(mod, name):
+    """[2026-11-06] pickle 안 전역 이름 허용 목록 — 표 · 숫자 자료(numpy · pandas · 날짜 등)의 클래스와 내부 복원 함수만"""
+    import importlib as _il
+    mod, name = str(mod or ""), str(name or "")
+    if not mod or not name or any(b in name for b in _PJ_PKL_BAD):
+        return False
+    if mod in ("builtins", "__builtin__"):          # __builtin__ = pickle 2 판의 옛 이름
+        return name in _PJ_PKL_BUILTINS
+    if mod == "pyarrow.lib":                         # pandas 문자열 열 (pyarrow) 복원
+        return name in ("_restore_array", "type_for_alias", "py_buffer", "schema", "field")
+    if mod == "copyreg":
+        return name in ("_reconstructor", "__newobj__", "__newobj_ex__")
+    if mod == "_codecs":
+        return name == "encode"
+    if mod.split(".")[0] not in _PJ_PKL_MODS or any(x in mod for x in (".io", "npyio", "testing", "f2py", "distutils", "plotting")):
+        return False
+    try:
+        obj = _il.import_module(mod)
+        for p in name.split("."):
+            obj = getattr(obj, p)
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(obj, type) or name.split(".")[-1].startswith("_") or name in ("scalar", "dtype")
+
+
+def _pj_pkl_safe(b):
+    """pickle 을 실행하지 않고 명령(opcode)만 훑어, 허용 목록 밖 함수 · 클래스를 부르면 False"""
+    import io as _io, pickletools as _pt
+    memo, strs = {}, []
+    try:
+        for op, arg, _pos in _pt.genops(_io.BytesIO(b)):
+            nm = op.name
+            if nm in ("GLOBAL", "INST"):
+                m_, n_ = (str(arg).split(" ", 1) + [""])[:2]
+                if not _pj_pkl_global_ok(m_, n_):
+                    return False
+            elif nm == "STACK_GLOBAL":
+                if len(strs) < 2 or not _pj_pkl_global_ok(strs[-2], strs[-1]):
+                    return False
+            elif nm in ("SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE", "STRING", "BINSTRING", "SHORT_BINSTRING"):
+                strs.append(arg)
+            elif nm == "MEMOIZE":
+                memo[len(memo)] = strs[-1] if strs else None
+            elif nm in ("BINPUT", "LONG_BINPUT", "PUT"):
+                memo[arg] = strs[-1] if strs else None
+            elif nm in ("BINGET", "LONG_BINGET", "GET"):
+                strs.append(memo.get(arg))
+            elif nm == "STOP":
+                break
+            else:
+                strs.append(None)
+            if len(strs) > 64:
+                del strs[:-8]
+        return True
+    except Exception:  # noqa: BLE001 — 깨진 pickle
+        return False
+
+
+def _pj_blob_safe(b, depth=0):
+    """[2026-11-06] 저장소에서 받은 파일 검사 — gzip · tar · zip 은 풀어서 안까지, pickle 은 _pj_pkl_safe. 그 밖(CSV · JSON · 그림 · DXF)은 통과"""
+    import gzip as _gz, io as _io, tarfile as _tar, zipfile as _zf
+    if not b or depth > 4:
+        return depth <= 4
+    try:
+        if b[:2] == b"\x1f\x8b":
+            return _pj_blob_safe(_gz.decompress(b), depth + 1)
+        if b[:2] == b"PK":
+            with _zf.ZipFile(_io.BytesIO(b)) as z:
+                return all(_pj_blob_safe(z.read(n), depth + 1) for n in z.namelist() if not n.endswith("/"))
+        if len(b) > 262 and b[257:262] == b"ustar":
+            with _tar.open(fileobj=_io.BytesIO(b)) as tf:
+                return all(_pj_blob_safe(tf.extractfile(m).read(), depth + 1) for m in tf.getmembers() if m.isfile())
+        if b[:1] == b"\x80" and len(b) > 2 and 2 <= b[1] <= 5:
+            return _pj_pkl_safe(b)
+        try:                                         # 옛 pickle (0 · 1판) : 끝까지 pickle 로 읽히면 같은 검사
+            import pickletools as _pt
+            for op, _a, _p in _pt.genops(_io.BytesIO(b)):
+                if op.name == "STOP":
+                    return _pj_pkl_safe(b)
+        except Exception:  # noqa: BLE001 — pickle 아님 (CSV · DXF · 그림 등)
+            pass
+        return True
+    except Exception:  # noqa: BLE001 — 풀다가 깨짐
+        return False
+
+
 def _pj_gh_get(path, cfg=None):
-    """저장소 파일 내용 (없으면 None)"""
+    """저장소 파일 내용 (없으면 None). [2026-11-06] pickle 묶음은 안을 검사해 실행 코드가 섞였으면 받지 않음 (토큰이 새어 누가 파일을 바꿔도 서버에서 실행 안 됨)"""
+    import sys as _sys
     cfg = cfg or _pj_gh_cfg()
     if not cfg:
         return None
     try:
-        return _pj_gh_call(cfg, "GET", path, raw=True)
+        b = _pj_gh_call(cfg, "GET", path, raw=True)
     except Exception:  # noqa: BLE001 — 없음(404) · 연결 실패
         return None
+    if not str(path).lower().endswith(".json") and not _pj_blob_safe(b):
+        rj = getattr(_sys, "_pj_gh_rejected", None)
+        if rj is None:
+            rj = _sys._pj_gh_rejected = []
+        if path not in rj:
+            rj.append(str(path))
+        return None
+    return b
 
 
 def _pj_gh_list(path, cfg=None):
@@ -2499,6 +2601,15 @@ def _pj_gh_put(path, data, cfg=None, msg=None, wait=False):
                 if sha:
                     body["sha"] = sha
                 _pj_gh_call(cfg, "PUT", path, body)
+                try:                                  # [2026-11-06] 상태 점검용 : 이 서버가 최근 올린 것
+                    import sys as _sys, time as _tm
+                    lg = getattr(_sys, "_pj_gh_log", None)
+                    if lg is None:
+                        lg = _sys._pj_gh_log = []
+                    lg.append((_tm.time(), str(path), len(data)))
+                    del lg[:-30]
+                except Exception:  # noqa: BLE001
+                    pass
                 return True
             except Exception:  # noqa: BLE001
                 continue
@@ -2563,6 +2674,79 @@ def _pj_gh_check():
     except Exception as e:  # noqa: BLE001
         out.append((False, f"쓰기 시험 실패 : {e}"))
     return out
+
+
+def _pj_gh_status():
+    """[2026-11-06] 보관 저장소 상태 (매니저) → (요약 줄 목록, 폴더별 표 DataFrame, 경고 목록)"""
+    import datetime as _dt, json as _js, sys as _sys, time as _tm, urllib.parse as _up, urllib.request as _ur
+    import pandas as _pd
+    cfg = _pj_gh_cfg()
+    if not cfg:
+        return ["보관 저장소(DATA_REPO · DATA_TOKEN)가 설정되지 않았습니다 — 서버 폴더에만 보관됩니다."], None, []
+    repo, tok, br = cfg
+
+    def api(p):
+        req = _ur.Request(f"https://api.github.com/repos/{repo}{p}", headers={"Authorization": f"Bearer {tok}", "User-Agent": "harbor-apps",
+                                                                         "X-GitHub-Api-Version": "2022-11-28"})
+        with _ur.urlopen(req, timeout=60) as r:
+            return _js.loads(r.read())
+    lines, warn = [], []
+    try:
+        info = api("")
+        kb = float(info.get("size", 0) or 0)
+        lines.append(f"저장소 {info.get('full_name')} ({'비공개' if info.get('private') else '공개 — 비공개로 바꾸세요'}) · 전체 용량 약 {kb / 1024:,.1f} MB")
+        if not info.get("private"):
+            warn.append("저장소가 공개입니다 — 보관 자료가 누구에게나 보입니다. GitHub 저장소 Settings 에서 Private 로 바꾸세요.")
+        if kb > 900 * 1024:
+            warn.append(f"저장소 용량이 {kb / 1024:,.0f} MB 입니다 — GitHub 권장 1 GB 에 가까움 (오래된 수집 자료 정리 필요)")
+    except Exception as e:  # noqa: BLE001
+        return [f"저장소 정보를 읽지 못했습니다 : {e} — '🔌 연결 확인' 을 먼저 눌러 보세요."], None, []
+    try:
+        c = api(f"/commits?sha={_up.quote(br)}&per_page=1")[0]
+        t = _dt.datetime.fromisoformat(c["commit"]["committer"]["date"].replace("Z", "+00:00")).astimezone()
+        lines.append(f"마지막 보관 : {t:%Y-%m-%d %H:%M} · '{c['commit']['message'][:40]}'")
+        if (_dt.datetime.now(t.tzinfo) - t).days >= 14:
+            warn.append(f"마지막 보관이 {(_dt.datetime.now(t.tzinfo) - t).days}일 전입니다 — 보관이 멈췄을 수 있습니다 (연결 확인).")
+    except Exception:  # noqa: BLE001
+        lines.append("마지막 보관 : (기록 없음)")
+    tab = None
+    try:
+        tr = api(f"/git/trees/{_up.quote(br)}?recursive=1")
+        rows = {}
+        for x in tr.get("tree", []):
+            if x.get("type") != "blob":
+                continue
+            p = x["path"].split("/")
+            grp = "/".join(p[:2]) if len(p) > 2 else (p[0] if len(p) > 1 else "(맨 위)")
+            r = rows.setdefault(grp, [0, 0, 0])
+            r[0] += 1
+            r[1] += int(x.get("size", 0) or 0)
+            r[2] = max(r[2], int(x.get("size", 0) or 0))
+            if int(x.get("size", 0) or 0) > 45 * 1024 * 1024:
+                warn.append(f"큰 파일 {x['path']} ({int(x['size']) / 1048576:,.0f} MB) — 100 MB 가 넘으면 GitHub 에 올라가지 않습니다.")
+        tab = _pd.DataFrame([{"폴더": k, "파일 수": v[0], "용량 (MB)": round(v[1] / 1048576, 2), "가장 큰 파일 (MB)": round(v[2] / 1048576, 2)}
+                             for k, v in sorted(rows.items())])
+        if tr.get("truncated"):
+            warn.append("파일이 너무 많아 목록 일부만 셌습니다.")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"폴더 목록을 읽지 못했습니다 : {e}")
+    rj = list(getattr(_sys, "_pj_gh_rejected", []) or [])
+    if rj:
+        warn.append("안전 검사에서 받지 않은 파일 (실행 코드가 섞였거나 깨진 파일) : " + ", ".join(rj[:10])
+                    + " — 누가 저장소 파일을 바꿨을 수 있습니다. DATA_TOKEN 을 새로 만드세요.")
+    else:
+        lines.append("안전 검사 : 이 서버가 받은 파일 중 거부된 것 없음")
+    lg = list(getattr(_sys, "_pj_gh_log", []) or [])
+    if lg:
+        lines.append("이 서버가 최근 올린 것 : " + " · ".join(f"{_tm.strftime('%m-%d %H:%M', _tm.localtime(t_))} {p_.split('/')[-1][:28]}"
+                                                      for t_, p_, _n in lg[-5:][::-1]))
+    reg = getattr(_sys, "_pj_mirror_reg", None)
+    if reg and reg.get("dirs"):
+        alive = reg.get("thread") is not None and reg["thread"].is_alive()
+        lines.append(f"수집 자료 자동 보관 : 폴더 {len(reg['dirs'])}개 등록 · 뒤 작업 {'동작 중' if alive else '멈춤'}")
+        if not alive:
+            warn.append("수집 자료 자동 보관 뒤 작업이 멈춰 있습니다 — 앱을 다시 시작(Reboot)하면 다시 돕니다.")
+    return lines, tab, warn
 
 
 def _pj_mirror(local_dir, prefix, skip=(), only=()):
@@ -2763,6 +2947,14 @@ def _pj_lib_put(body):
         pass
 
 
+def _pj_lib_put_bg(body):
+    """[2026-11-06] 보관을 뒤 스레드에서 (저장소에서 옛 기록을 받아 오는 동안 저장 · 불러오기가 기다리지 않게)"""
+    import copy as _cp, threading as _th
+    if not _PJ.get("lib"):
+        return
+    _th.Thread(target=_pj_lib_put, args=(_cp.deepcopy(body),), daemon=True).start()
+
+
 def _pj_lib_ghdir():
     return f"input_library/{int(_PJ.get('no') or 0):02d}"
 
@@ -2841,11 +3033,46 @@ def _pj_mgr_ok(key="_pj_mgr_pw", force=False):
         return False
     pw = st.text_input("🔐 매니저 비밀번호", type="password", key=key)
     if pw:
-        if _hm.compare_digest(pw.encode("utf-8"), mk.encode("utf-8")):
+        ok_, msg_ = _pj_pw_try(pw, mk)
+        if ok_:
             ss["_mgr_ok"] = True
             st.rerun()
-        st.error("비밀번호가 다릅니다.")
+        st.error(msg_)
     return False
+
+
+def _pj_pw_try(pw, mk):
+    """[2026-11-06] 매니저 비밀번호 확인 + 연속 실패 잠금 → (맞음, 안내).
+    한 창에서 5번 틀리면 그 창 10분 잠금, 모든 사용자 합쳐 10분 안에 20번 틀리면 전체 10분 잠금 (새 탭으로 계속 맞춰 보기 방지).
+    같은 글자를 그대로 두고 화면만 새로 그려지면 다시 세지 않음. 틀릴 때마다 1초 기다림"""
+    import hashlib as _hl, hmac as _hm, sys as _sys, threading as _th, time as _tm
+    ss = st.session_state
+    now = _tm.time()
+    g = getattr(_sys, "_pj_pw_fail", None)
+    if g is None:
+        g = _sys._pj_pw_fail = {"t": [], "lock": 0.0, "mx": _th.Lock()}
+    until = max(float(ss.get("_pj_pw_lock", 0.0)), float(g["lock"]))
+    if now < until:
+        return False, f"비밀번호를 여러 번 틀려 잠갔습니다 — {int((until - now) // 60) + 1}분 뒤 다시 넣어 주세요."
+    if _hm.compare_digest(pw.encode("utf-8"), mk.encode("utf-8")):
+        ss["_pj_pw_n"] = 0
+        ss.pop("_pj_pw_last", None)
+        return True, ""
+    h = _hl.sha256(("pj|" + pw).encode("utf-8")).hexdigest()
+    n = int(ss.get("_pj_pw_n", 0))
+    if ss.get("_pj_pw_last") != h:             # 새로 넣은 값일 때만 셈
+        ss["_pj_pw_last"] = h
+        _tm.sleep(1.0)
+        n += 1
+        ss["_pj_pw_n"] = n
+        with g["mx"]:
+            g["t"] = [t for t in g["t"] if now - t < 600] + [now]
+            if len(g["t"]) >= 20:
+                g["lock"], g["t"] = now + 600, []
+        if n >= 5:
+            ss["_pj_pw_lock"], ss["_pj_pw_n"] = now + 600, 0
+            return False, "비밀번호를 5번 틀려 10분 동안 잠갔습니다."
+    return False, f"비밀번호가 다릅니다. ({n}/5 — 5번 틀리면 10분 잠금)"
 
 
 def _pj_confirm(label, key, warn, **bkw):
@@ -2911,9 +3138,17 @@ def _pj_lib_ui():
     if not _pj_mgr_ok(key="_pj_mgr_pw_lib", force=True):    # [2026-10-27] '🔐 매니저 관리' 상자 안 — 비밀번호를 넣어야 아래가 보임
         return
     st.markdown("**🗄 보관된 입력제원**")
-    if st.button("🔌 보관 저장소 연결 확인", key="_pj_gh_chk"):
+    _c1, _c2 = st.columns(2)
+    if _c1.button("🔌 보관 저장소 연결 확인", key="_pj_gh_chk", width="stretch"):
         for ok_, m_ in _pj_gh_check():
             (st.success if ok_ else st.error)(("✅ " if ok_ else "❌ ") + m_)
+    if _c2.button("📊 보관 저장소 상태 점검", key="_pj_gh_stat", width="stretch"):
+        _ln, _tb, _wn = _pj_gh_status()
+        for w_ in _wn:
+            st.warning("⚠ " + w_)
+        st.markdown("\n".join(f"- {x}" for x in _ln))
+        if _tb is not None and len(_tb):
+            st.dataframe(_tb, hide_index=True, width="stretch")
     recs = _pj_lib_list()
     if not recs:
         st.caption("보관된 입력제원이 없습니다. 입력을 저장(💾 JSON)하거나 파일로 불러오면 여기에 자동으로 보관됩니다.")
@@ -2974,52 +3209,58 @@ def _pj_panel(c):
         with slots[i].expander("💾 입력 저장 / 불러오기", expanded=bool(msg)):
             if msg:
                 st.success(msg)
-            _fn_box = [None]
+            _frag = getattr(st, "fragment", None) or (lambda f: f)
 
-            def _save(_S=S):
-                """누르는 순간의 입력값으로 저장 파일을 만듦 (처음 열자마자 눌러도 빈 파일이 되지 않게)"""
-                import time as _tm
-                _tm.sleep(0.8)                    # [2026-11-03] 프로젝트명을 막 입력하고 바로 누르면 그 값이 서버에 닿기 전에 불림 → 잠깐 기다림
-                body = _pj_body(_S)
-                _pj_lib_put(body)                 # 🗄 보관함에도 자동 보관 (보관함을 켠 앱만)
-                try:                              # [2026-11-03] 파일 이름도 누르는 순간의 프로젝트명으로 (전에는 화면 그릴 때 이름 → 두 번 눌러야 새 이름)
+            @_frag
+            def _pj_save_frag():
+                """[2026-11-06] 이 상자 안 조작(프로젝트명 · 파일 고르기)은 상자만 다시 그림 — 무거운 앱도 바로 반응"""
+                _fn_box = [None]
+
+                def _save(_S=S):
+                    """누르는 순간의 입력값으로 저장 파일을 만듦 (처음 열자마자 눌러도 빈 파일이 되지 않게)"""
+                    import time as _tm
+                    _tm.sleep(0.8)                    # [2026-11-03] 프로젝트명을 막 입력하고 바로 누르면 그 값이 서버에 닿기 전에 불림 → 잠깐 기다림
+                    body = _pj_body(_S)
+                    _pj_lib_put_bg(body)              # 🗄 보관함에도 자동 보관 (보관함을 켠 앱만, 뒤에서 — 저장이 기다리지 않게)
+                    try:                              # [2026-11-03] 파일 이름도 누르는 순간의 프로젝트명으로 (전에는 화면 그릴 때 이름 → 두 번 눌러야 새 이름)
+                        from streamlit import runtime as _rt
+                        _m = _rt.get_instance().media_file_mgr
+                        _nf = _pj_fname(body.get("project"))
+                        for _e in _fn_box[1:]:            # 이 단추를 그릴 때 붙잡아 둔 등록 정보 (기다리는 사이 화면이 새로 그려져 목록에서 빠져도 그대로 씀)
+                            _e["filename"] = _nf
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return _js.dumps(body, ensure_ascii=False, indent=1).encode("utf-8")
+                pn = st.text_input("프로젝트명 (저장 파일 이름)", key="_pj_pname", placeholder="예 : 울산신항 8부두",
+                                   help="저장 파일 이름 = 프로그램명-프로젝트명(저장날짜).json — 입력한 뒤 Enter (또는 칸 밖을 한 번 누름) 하고 저장")
+                _fn = _pj_fname(pn)
+                _fn_box[0] = _fn
+                # [2026-11-03] 이름이 바뀌면 단추도 새로 (같은 key 면 옛 파일 이름이 남아 프로젝트명이 빠졌음)
+                st.download_button("💾 입력 저장 (JSON)", _save, file_name=_fn, mime="application/json",
+                                   key="_pj_dl_" + _pj_finger({"f": _fn})[:8], width="stretch")
+                try:                                  # [2026-11-03] 방금 등록된 이 단추의 지연 다운로드 정보를 붙잡아 둠 (누르는 순간 파일 이름을 바꾸려고)
                     from streamlit import runtime as _rt
-                    _m = _rt.get_instance().media_file_mgr
-                    _nf = _pj_fname(body.get("project"))
-                    for _e in _fn_box[1:]:            # 이 단추를 그릴 때 붙잡아 둔 등록 정보 (기다리는 사이 화면이 새로 그려져 목록에서 빠져도 그대로 씀)
-                        _e["filename"] = _nf
+                    _fn_box += [_e for _e in list(getattr(_rt.get_instance().media_file_mgr, "_deferred_callables", {}).values())
+                                if _e.get("filename") == _fn]
                 except Exception:  # noqa: BLE001
                     pass
-                return _js.dumps(body, ensure_ascii=False, indent=1).encode("utf-8")
-            pn = st.text_input("프로젝트명 (저장 파일 이름)", key="_pj_pname", placeholder="예 : 울산신항 8부두",
-                               help="저장 파일 이름 = 프로그램명-프로젝트명(저장날짜).json — 입력한 뒤 Enter (또는 칸 밖을 한 번 누름) 하고 저장")
-            _fn = _pj_fname(pn)
-            _fn_box[0] = _fn
-            # [2026-11-03] 이름이 바뀌면 단추도 새로 (같은 key 면 옛 파일 이름이 남아 프로젝트명이 빠졌음)
-            st.download_button("💾 입력 저장 (JSON)", _save, file_name=_fn, mime="application/json",
-                               key="_pj_dl_" + _pj_finger({"f": _fn})[:8], width="stretch")
-            try:                                  # [2026-11-03] 방금 등록된 이 단추의 지연 다운로드 정보를 붙잡아 둠 (누르는 순간 파일 이름을 바꾸려고)
-                from streamlit import runtime as _rt
-                _fn_box += [_e for _e in list(getattr(_rt.get_instance().media_file_mgr, "_deferred_callables", {}).values())
-                            if _e.get("filename") == _fn]
-            except Exception:  # noqa: BLE001
-                pass
-            st.caption(f"저장될 파일 이름 : {_fn}")
-            up = st.file_uploader("📂 저장한 입력 불러오기", type=["json"], key="_pj_up")
-            if up is not None and ss.get("_pj_up_id") != up.file_id:
-                ss["_pj_up_id"] = up.file_id
-                try:
-                    d = _js.loads(up.getvalue().decode("utf-8"))
-                    if not isinstance(d, dict) or "inputs" not in d:
-                        st.error("저장한 입력 파일(JSON)이 아닙니다.")
-                    elif d.get("app") not in (None, _PJ["app"]):
-                        st.error(f"다른 앱({d.get('app')})에서 저장한 파일입니다.")
-                    else:
-                        _pj_lib_put(d)                # 🗄 불러온 입력제원도 보관
-                        ss["_pj_pending"] = d
-                        st.rerun()
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"불러오기 실패 : {e}")
+                st.caption(f"저장될 파일 이름 : {_fn}")
+                up = st.file_uploader("📂 저장한 입력 불러오기", type=["json"], key="_pj_up")
+                if up is not None and ss.get("_pj_up_id") != up.file_id:
+                    ss["_pj_up_id"] = up.file_id
+                    try:
+                        d = _js.loads(up.getvalue().decode("utf-8"))
+                        if not isinstance(d, dict) or "inputs" not in d:
+                            st.error("저장한 입력 파일(JSON)이 아닙니다.")
+                        elif d.get("app") not in (None, _PJ["app"]):
+                            st.error(f"다른 앱({d.get('app')})에서 저장한 파일입니다.")
+                        else:
+                            _pj_lib_put_bg(d)             # 🗄 불러온 입력제원도 보관 (뒤에서)
+                            ss["_pj_pending"] = d
+                            st.rerun()
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"불러오기 실패 : {e}")
+            _pj_save_frag()
             nt = len(_PJ.get("tables") or {})
             st.caption(f"저장 대상 : 이름표가 있는 입력란 {len(_pj_widget_keys(S))}개" + (f" · 표 {nt}개" if nt else "")
                        + " (파일 · 이름표 없는 입력란 제외)")
@@ -4319,6 +4560,61 @@ _pj_credit()                    # [공통블록] 제작자 표시
 kit_css()
 st.markdown("항만 및 개발 사업에 수반되는 핵심 **영향평가 및 인허가 업무** 관련 법령들의 최신 제·개정 상태를 추적합니다.")
 
+# =====================================================================
+# ★ 23번 앱 사용설명서 (16번 블록식처럼 제목 바로 밑 — 2026-11-02 독립 앱 요청, 11-09 맨 앞으로)
+#    내용 = Home 23번 사용설명서 + 현재 화면 기준 정정 (키 입력 위치 · Secrets 키 · [cite] 표기 삭제)
+# =====================================================================
+# 개인 · 조직 통합 앱(pages/ 안)에서는 Home 에 같은 설명서가 있어 숨김 — 독립 앱 · 원본에서만 (11.02 사용자 '독립 앱만')
+if Path(__file__).resolve().parent.name != "pages":
+    st.markdown("""
+23. **인허가 (License & Permit)**: 항만 · 개발 사업의 영향평가 · 인허가 관련 법령 자동 업데이트 및 상세 가이드 프로그램 (2026.09.08 작성)
+""")
+
+    with st.expander("👉 인허가 관련 법령 자동 업데이트 대시보드 앱 사용설명서 보기"):
+        st.markdown(r"""
+    **■ 🏛️ 인허가 관련 법령 자동 업데이트 대시보드 사용자 매뉴얼**
+
+    항만 및 개발 사업에 수반되는 핵심 **영향평가 및 인허가 업무** 관련 법령들의 최신 제·개정 상태를 추적하고, 종합 보고서를 자동 생성하는 시스템입니다.
+
+    ---
+
+    ### **Ⅰ. 주요 기능 및 사용 방법**
+
+    **📍 1단계: 인허가-법령 리스트 확인 및 편집**
+    * 왼쪽 **[1. 인허가-법령 리스트]** 표에서 기본으로 짝지어진 주요 인허가 항목(전략환경영향평가, 해양이용영향평가, 재해영향평가 등)과 검색할 법령명을 확인합니다.
+    * 필요하면 새로운 인허가 항목과 정확한 법령명을 직접 추가하거나 수정할 수 있습니다.
+
+    **📍 2단계: 최신 법령 데이터 업데이트 실행**
+    * 오른쪽 **[2. 법령 업데이트 결과 대시보드]** 위의 **🔑 법제처 API 키 (OC)** 칸을 확인합니다.
+      * 칸 옆에 **'🔑 등록된 법제처 키 사용 중'** 이 보이면 칸을 비워 둔 채로 쓰면 됩니다 (관리자가 등록한 키 사용).
+      * 다른 키를 쓰려면 칸에 넣습니다 (법제처 OPEN API 승인 · 이 앱 서버 주소 등록이 된 OC).
+    * **[🚀 최신 법령 데이터 업데이트 실행]** 버튼을 누르면 법제처 서버와 통신하여 각 법령의 실제 법령명, 시행일자, 공포일자, 제개정구분, 상세링크(원문)를 자동으로 모읍니다. 법령에 없으면 행정규칙(훈령 · 예규 · 고시)에서 다시 찾습니다.
+    * 법제처가 조회를 거부하면 표에 **'⛔ 법제처 거부 : 사유'** 와 빨간 안내 상자가 나옵니다 — 키 · 등록한 서버 주소를 확인하세요.
+
+    **📍 3단계: 업데이트 결과 대시보드 확인 및 다운로드**
+    * 업데이트가 끝나면 오른쪽 화면에 각 인허가 법령의 최신 상태가 표로 정리되어 나타납니다.
+    * 결과표 아래 다운로드 버튼으로 **Excel, HTML, MS Word(.docx)** 형식의 종합 보고서를 저장할 수 있습니다.
+
+    **📍 4단계: 설계범위 기반 인허가 분석**
+    * 시설 선택 → 규모 입력 (또는 설계보고서 PDF 자동 추출) → 24개 인허가의 필수 / 해당 가능 판정, 단계별 로드맵, Excel 을 제공합니다.
+    * 판정은 입력값에 따른 1차 검토 결과입니다. '해당 가능' 항목은 각 시행령 별표의 규모 기준과 관계기관 사전협의로 최종 확인하십시오.
+
+    **📍 5단계: 설계 시행 주요 인허가 상세 가이드 열람**
+    * 화면 아래 상세 가이드에서 각 인허가의 개요, 실시근거, 대상사업 및 협의시기, 협의기관, 평가항목과 대상범위 · 근거 위치(법 → 시행령 → 별표)를 확인합니다.
+    * **6. 절차 및 양식 보기** 를 펼치면 현행 법령(2026.10 확인) 기준 절차 흐름도와 법제처 원문 링크가 포함된 법정 양식 정보를 볼 수 있습니다.
+    """)
+        st.markdown("---")
+        st.markdown("##### 🗂 상세 변경 이력")
+        st.markdown("""
+* **10.08** 화면 양식 통일 (10번 EP 기준)
+* **10.12** 현행 법령(2026.10) 기준 인허가 절차 흐름도 24개 분야 31종 신규 도식화 · 근거 법령 정정, '설계범위 기반 인허가 분석'(시설·규모 입력 또는 설계보고서 PDF 자동 추출 → 24개 인허가 판정 · 단계별 로드맵 · Excel), 항목별 대상범위 · 근거 위치 표, 발주방식(일반 / 턴키·기술제안)별 시기 · 수행 주체 구분
+* **10.20** 인허가 로드맵 그림 범례 색 구분 (■ 파랑 = 필수 · ■ 주황 = 해당 가능) · '2. 분석 결과' 판정 기준 설명 상자 · 법령 검색에 없으면 행정규칙(훈령·예규·고시)에서 다시 찾음
+* **10.23** 검증보고서 22-25번 반영 — 법령명 완전일치 항목 채택(없으면 '확인 필요'), 공사 위치 '육역'인데 해역 시설이 있으면 경고, 민간 사업 VE '해당 가능', 총공사비 소수 표시, 기후영향평가 근거 법령 = 탄소중립기본법
+* **10.30** 법제처 공용 'test' 키 거부(사용자 정보 검증 실패)에 맞춰 — 등록된 법제처 키(Secrets) 자동 사용, 조회 거부 사유를 표 · 안내 상자에 표시
+* **11.02** 앱 화면에 사용설명서 추가
+    """)
+
+
 col1, col2 = st.columns([1, 2], vertical_alignment="top")
 _H = ("<div style='height:52px;display:flex;align-items:center;border-left:6px solid #1d4ed8;padding-left:10px;"
       "margin:0 0 10px;font-size:clamp(1.0rem,1.6vw,1.4rem);font-weight:800;color:#1e3a8a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{}</div>")
@@ -5086,6 +5382,138 @@ def scope_roadmap_png(df):
     return buf.getvalue()
 
 
+
+# [2026-11-06] 아이디어 10 — 판정된 인허가의 근거 조문 · 법제처 바로가기 (SCOPE_INFO 의 근거 위치 · 시기 그대로, 원문 없는 제출서류 목록은 만들지 않음)
+def _law_names(where_list):
+    import re as _r
+    out = []
+    for w in where_list:
+        for nm in _r.findall(r"「([^」]+)」", w):
+            if nm not in out:
+                out.append(nm)
+    return out
+
+
+def _law_url(q):
+    from urllib.parse import quote as _q
+    return f"https://www.law.go.kr/lsSc.do?menuId=1&query={_q(q)}"
+
+
+def scope_links_rows(df):
+    rows = []
+    for _, r in df[df["판정"] != "○ 해당 없음"].iterrows():
+        d = SCOPE_INFO.get(int(r["번호"]), {})
+        laws = _law_names(d.get("where", []))
+        rows.append({"번호": int(r["번호"]), "인허가": r["인허가"], "판정": r["판정"],
+                     "근거 위치 (법 → 시행령 → 별표)": " / ".join(d.get("where", [])) or "-",
+                     "협의 · 실시 시기": d.get("timing", "-"),
+                     "법령": laws,
+                     "바로가기": [(nm, _law_url(nm)) for nm in laws] + [(nm + " 시행령", _law_url(nm + " 시행령")) for nm in laws
+                                                                       if not nm.endswith(("규정", "가이드라인", "조례")) and "시행령" not in nm][:2]})
+    return rows
+
+
+def scope_links_html(rows):
+    import html as _h
+    md = lambda s_: _kit_re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _h.escape(str(s_)))
+    tr = []
+    for r in rows:
+        lk = " · ".join(f"<a href='{u}' target='_blank'>{_h.escape(n)}</a>" for n, u in r["바로가기"]) or "-"
+        tr.append(f"<tr><td style='text-align:center'>{r['번호']}</td><td><b>{_h.escape(r['인허가'])}</b><br><span style='font-size:12px'>{r['판정']}</span></td>"
+                  f"<td style='font-size:12.5px'>{md(r['근거 위치 (법 → 시행령 → 별표)'])}</td><td style='font-size:12.5px'>{md(r['협의 · 실시 시기'])}</td>"
+                  f"<td style='font-size:12.5px'>{lk}</td></tr>")
+    th = "".join(f"<th style='background:#1e3a8a;color:#fff;padding:5px'>{x}</th>" for x in ("번호", "인허가", "근거 위치 (법 → 시행령 → 별표)", "협의 · 실시 시기", "법제처 바로가기"))
+    return ("<table style='width:100%;border-collapse:collapse;color:#0f172a' border='1' cellpadding='5'>"
+            f"<tr>{th}</tr>{''.join(tr)}</table>")
+
+
+# [2026-11-06] 아이디어 9 — 인허가 일정표 : 단계 기간(사용자 가정) + 법정 검토 기간 (각 인허가 '법정 기간' 칸의 첫 일수)
+def _legal_days(period, why=""):
+    import re as _r
+    p = str(period or "")
+    if not p or p.strip() == "-" or p.startswith("심의") or "협의기간 내" in p:
+        return None
+    parts = [x for x in p.split("/")]
+    pick = parts[1] if (len(parts) > 1 and "소규모" in str(why)) else parts[0]
+    m = _r.search(r"(\d+)\s*일", pick) or _r.search(r"(\d+)\s*일", p)
+    return int(m.group(1)) if m else None
+
+
+def scope_schedule(df, start, plan_m, base_m, det_m, done=()):
+    import pandas as _pd
+    st0 = _pd.Timestamp(start)
+    b = [st0]
+    for mth in (plan_m, base_m, det_m):
+        b.append(b[-1] + _pd.DateOffset(months=int(mth)))
+    ends = {0: b[1], 1: b[2], 2: b[3]}
+    rows = []
+    for _, r in df[df["판정"] != "○ 해당 없음"].iterrows():
+        k = int(r["_단계"])
+        dd = _legal_days(r["법정 기간"], r["판정 사유"])
+        note = ""
+        if k >= 3:
+            s_ = b[3]
+            e_ = s_ + _pd.Timedelta(days=dd or 0)
+        else:
+            e_ = ends[k]
+            s_ = e_ - _pd.Timedelta(days=dd or 0)
+            if k == 0 and int(plan_m) == 0:
+                note = "착수 전 완료 필요 (상위계획에서 이행 · 기 이행 확인)"
+            elif s_ < b[k]:
+                note = "법정 검토 기간이 단계 기간보다 김 — 앞 단계에서 미리 요청"
+        rows.append({"번호": int(r["번호"]), "인허가": r["인허가"], "판정": r["판정"], "단계": r["시기"], "비고": note,
+                     "법정 검토 (일)": dd if dd is not None else "-", "협의 요청 늦어도": s_.date(), "협의 완료 목표": e_.date(),
+                     "상태": "완료 (이미 받음)" if int(r["번호"]) in done else "예정", "_k": k, "_s": s_, "_e": e_})
+    return _pd.DataFrame(rows), b
+
+
+def scope_gantt_png(sd, b, title):
+    import matplotlib.dates as _md
+    _fplt.rcParams["font.family"] = _flow_font()
+    _fplt.rcParams["axes.unicode_minus"] = False
+    n = max(len(sd), 3)
+    fig, ax = _fplt.subplots(figsize=(11.5, 0.42 * n + 1.9))
+    names = ["기초조사·기본계획", "기본설계 (입찰)", "실시설계 (낙찰자)"] if sd.attrs.get("tk") else ["계획", "기본설계", "실시설계"]
+    for k in range(3):
+        if b[k + 1] > b[k]:
+            ax.axvspan(b[k], b[k + 1], color="#f1f5f9" if k % 2 == 0 else "#ffffff", zorder=0)
+            ax.text(b[k] + (b[k + 1] - b[k]) / 2, 0.9, f"{names[k]}\n{b[k]:%y.%m} – {b[k + 1]:%y.%m}", ha="center", va="bottom",
+                    fontsize=9.5, fontweight="bold", color="#1e3a8a")
+    ax.axvline(b[3], color="#c2410c", lw=1.2, ls="--")
+    ax.axvline(b[0], color="#1e3a8a", lw=1.0, ls=":")
+    ax.text(b[0], 1.55, f"착수 {b[0]:%y.%m.%d}", ha="left", va="bottom", fontsize=9, color="#1e3a8a")
+    ax.text(b[3], 0.9, f"착공 전\n{b[3]:%y.%m.%d}", ha="left", va="bottom", fontsize=9.5, fontweight="bold", color="#c2410c")
+    for i, (_, r) in enumerate(sd.sort_values(["_k", "_s", "번호"]).iterrows()):
+        y = -i
+        done = r["상태"].startswith("완료")
+        col = "#94a3b8" if done else ("#1d4ed8" if r["판정"].startswith("●") else "#f59e0b")
+        w = (r["_e"] - r["_s"]).days
+        if w > 0:
+            ax.barh(y, w, left=r["_s"], height=0.6, color=col, alpha=0.9 if not done else 0.6)
+        else:
+            ax.plot([r["_e"]], [y], marker="D", color=col, ms=7)
+        nm = r["인허가"].split(" (")[0].split(" / ")[0]
+        lab = f"{r['번호']}. {nm[:16]}" + (" (완료)" if done else "") + (f"  {r['법정 검토 (일)']}일" if r["법정 검토 (일)"] != "-" else "  (법정 기간 없음)")
+        ax.annotate(lab, (r["_s"], y), xytext=(-6, 0), textcoords="offset points", ha="right", va="center", fontsize=8.6,
+                    color="#475569" if done else "#0f172a")
+    import pandas as _pd
+    span = max(b[3] - b[0], _pd.Timedelta(days=60))
+    lo = min(b[0], sd["_s"].min()) - span * 0.32
+    hi = max(b[3] + span * 0.12, sd["_e"].max() + _pd.Timedelta(days=10))
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(-n + 0.4, 1.9)
+    ax.set_yticks([])
+    ax.xaxis.set_major_formatter(_md.DateFormatter("%y.%m"))
+    for sp in ("top", "right", "left"):
+        ax.spines[sp].set_visible(False)
+    ax.set_title(title, fontsize=12, fontweight="bold", loc="left")
+    fig.tight_layout()
+    buf = _fio.BytesIO()
+    fig.savefig(buf, format="png", dpi=130)
+    _fplt.close(fig)
+    return buf.getvalue()
+
+
 _sc_raw = analyze_scope()
 sc_df = apply_delivery(_sc_raw, sc_tk)
 sc_df.attrs["turnkey"] = sc_tk
@@ -5127,6 +5555,37 @@ _rm = scope_roadmap_png(sc_df)
 st.image(_rm, caption="인허가 로드맵 (사업 단계별 배치, 상세 절차는 아래 가이드의 '6. 절차' 흐름도 참조)", use_container_width=True)
 st.caption("※ 판정은 입력값에 따른 1차 검토 결과입니다. '해당 가능' 항목은 각 시행령 별표의 규모 기준과 관계기관 사전협의로 최종 확인하십시오. "
            "기준일 : 2026.10 (해양이용영향평가법 2026.9.18 시행, 해상교통안전법, 기후에너지환경부 개편 반영).")
+_lk_rows = scope_links_rows(sc_df)
+with st.expander(f"🔗 판정된 인허가 {len(_lk_rows)}건 — 근거 조문 · 협의 시기 · 법제처 바로가기"):
+    st.caption("근거 위치 · 시기는 아래 '상세 가이드' 의 대상범위 표와 같은 내용입니다 (✔ 현행 조문 확인 / ※ 별표 · 고시 원문 확인 필요). "
+               "바로가기는 법제처 국가법령정보센터 검색 화면으로 열립니다. 제출서류는 각 법령 시행규칙 [별지 서식] 에서 확인하십시오.")
+    st.markdown(scope_links_html(_lk_rows), unsafe_allow_html=True)
+with st.expander("📅 인허가 일정표 (법정 검토 기간 기준)"):
+    st.caption("단계 기간은 입력하신 가정값이고, 막대 길이는 각 인허가의 '법정 기간' (협의 · 검토 일수) 입니다. "
+               "평가서 작성 · 현지조사 · 주민의견 수렴 같은 준비 기간은 사업마다 달라 넣지 않았습니다 — 그만큼 더 앞당겨 시작해야 합니다. "
+               "계획 · 기본 · 실시설계 단계 인허가는 그 단계가 끝나기 전에 협의를 마치도록, 착공 전 인허가는 실시설계가 끝난 뒤에 배치했습니다.")
+    _q1, _q2, _q3, _q4 = st.columns(4)
+    _sch_start = _q1.date_input("착수일", value=datetime.now().date(), key="sc_sch_start")
+    _sch_p = _q2.number_input("계획 단계 (개월)", value=6 if (sc_stage.startswith("상위계획") or sc_tk) else 0, min_value=0, max_value=60, step=1, key=f"sc_sch_p_{int(sc_stage.startswith('상위계획') or sc_tk)}",
+                              help="상위계획 · 턴키 기초조사 단계가 없으면 0")
+    _sch_b = _q3.number_input("기본설계 (개월)", value=8, min_value=0, max_value=60, step=1, key="sc_sch_b")
+    _sch_d = _q4.number_input("실시설계 (개월)", value=10, min_value=0, max_value=60, step=1, key="sc_sch_d")
+    _cands = [f"{int(n)}. {nm}" for n, nm, m in zip(sc_df["번호"], sc_df["인허가"], sc_df["판정"]) if m != "○ 해당 없음"]
+    _done_sel = st.multiselect("이미 받은(완료) 인허가", _cands, default=[], key="sc_sch_done", help="고르면 회색 '완료' 로 표시")
+    _done = {int(x.split(".")[0]) for x in _done_sel}
+    sc_sch, _sch_b_ = scope_schedule(sc_df, _sch_start, _sch_p, _sch_b, _sch_d, _done)
+    sc_sch.attrs["tk"] = sc_tk
+    if len(sc_sch):
+        st.image(scope_gantt_png(sc_sch, _sch_b_, f"인허가 일정표 — {sc_name}"), use_container_width=True)
+        _left = sc_sch[~sc_sch["상태"].str.startswith("완료")]
+        if len(_left):
+            _first = _left.sort_values("_s").iloc[0]
+            st.info(f"가장 먼저 협의를 요청해야 하는 것 : **{_first['번호']}. {_first['인허가']}** — 늦어도 {_first['협의 요청 늦어도']} 요청 "
+                    f"(법정 검토 {_first['법정 검토 (일)']}일, 준비 기간 별도)" + (f" · {_first['비고']}" if _first["비고"] else ""))
+        st.markdown(kit_table(sc_sch[["번호", "인허가", "판정", "단계", "법정 검토 (일)", "협의 요청 늦어도", "협의 완료 목표", "상태", "비고"]], wrap=True),
+                    unsafe_allow_html=True)
+    else:
+        st.caption("해당 인허가가 없습니다.")
 _xb = BytesIO()
 with pd.ExcelWriter(_xb, engine="openpyxl") as _w:
     pd.DataFrame([{"항목": k, "값": v} for k, v in [("사업명", sc_name), ("지역", sc_region), ("항만 구분", sc_port), ("사업 단계", sc_stage), ("발주 방식", sc_order[2:].strip()),
@@ -5139,6 +5598,10 @@ with pd.ExcelWriter(_xb, engine="openpyxl") as _w:
     sc_fac[sc_fac["선택"]].to_excel(_w, sheet_name="설계대상시설", index=False)
     sc_df[show_cols].to_excel(_w, sheet_name="인허가판정", index=False)
     scope_th_df().to_excel(_w, sheet_name="판정기준표", index=False)
+    pd.DataFrame([{k: v for k, v in r.items() if k not in ("법령", "바로가기")} | {"법제처 바로가기": " / ".join(u for _n, u in r["바로가기"])}
+                  for r in _lk_rows]).to_excel(_w, sheet_name="근거·바로가기", index=False)
+    if len(sc_sch):
+        sc_sch[["번호", "인허가", "판정", "단계", "법정 검토 (일)", "협의 요청 늦어도", "협의 완료 목표", "상태", "비고"]].to_excel(_w, sheet_name="인허가일정", index=False)
 st.download_button("💾 인허가 분석 결과 Excel 다운로드", data=_xb.getvalue(), file_name=f"인허가분석_{sc_name}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -5597,61 +6060,6 @@ with st.expander("24. 항만공간 공공디자인 협의"):
         show_flows(24, has_old=False)
         st.markdown("설계 반영 ➔ 관계기관 협의 및 자문 ➔ 실시계획 반영.")
         st.markdown("👉 관련지침: 해양수산부 예규 ([항만공간의 공공디자인 가이드라인](https://www.law.go.kr/lsSc.do?menuId=1&query=항만공간의공공디자인가이드라인))")
-
-
-# =====================================================================
-# ★ 23번 앱 사용설명서 (16번 블록식처럼 앱 화면에도 — 2026-11-02 독립 앱 요청)
-#    내용 = Home 23번 사용설명서 + 현재 화면 기준 정정 (키 입력 위치 · Secrets 키 · [cite] 표기 삭제)
-# =====================================================================
-# 개인 · 조직 통합 앱(pages/ 안)에서는 Home 에 같은 설명서가 있어 숨김 — 독립 앱 · 원본에서만 (11.02 사용자 '독립 앱만')
-if Path(__file__).resolve().parent.name != "pages":
-    st.markdown("""
-23. **인허가 (License & Permit)**: 항만 · 개발 사업의 영향평가 · 인허가 관련 법령 자동 업데이트 및 상세 가이드 프로그램 (2026.09.08 작성)
-""")
-
-    with st.expander("👉 인허가 관련 법령 자동 업데이트 대시보드 앱 사용설명서 보기"):
-        st.markdown(r"""
-    **■ 🏛️ 인허가 관련 법령 자동 업데이트 대시보드 사용자 매뉴얼**
-
-    항만 및 개발 사업에 수반되는 핵심 **영향평가 및 인허가 업무** 관련 법령들의 최신 제·개정 상태를 추적하고, 종합 보고서를 자동 생성하는 시스템입니다.
-
-    ---
-
-    ### **Ⅰ. 주요 기능 및 사용 방법**
-
-    **📍 1단계: 인허가-법령 리스트 확인 및 편집**
-    * 왼쪽 **[1. 인허가-법령 리스트]** 표에서 기본으로 짝지어진 주요 인허가 항목(전략환경영향평가, 해양이용영향평가, 재해영향평가 등)과 검색할 법령명을 확인합니다.
-    * 필요하면 새로운 인허가 항목과 정확한 법령명을 직접 추가하거나 수정할 수 있습니다.
-
-    **📍 2단계: 최신 법령 데이터 업데이트 실행**
-    * 오른쪽 **[2. 법령 업데이트 결과 대시보드]** 위의 **🔑 법제처 API 키 (OC)** 칸을 확인합니다.
-      * 칸 옆에 **'🔑 등록된 법제처 키 사용 중'** 이 보이면 칸을 비워 둔 채로 쓰면 됩니다 (관리자가 등록한 키 사용).
-      * 다른 키를 쓰려면 칸에 넣습니다 (법제처 OPEN API 승인 · 이 앱 서버 주소 등록이 된 OC).
-    * **[🚀 최신 법령 데이터 업데이트 실행]** 버튼을 누르면 법제처 서버와 통신하여 각 법령의 실제 법령명, 시행일자, 공포일자, 제개정구분, 상세링크(원문)를 자동으로 모읍니다. 법령에 없으면 행정규칙(훈령 · 예규 · 고시)에서 다시 찾습니다.
-    * 법제처가 조회를 거부하면 표에 **'⛔ 법제처 거부 : 사유'** 와 빨간 안내 상자가 나옵니다 — 키 · 등록한 서버 주소를 확인하세요.
-
-    **📍 3단계: 업데이트 결과 대시보드 확인 및 다운로드**
-    * 업데이트가 끝나면 오른쪽 화면에 각 인허가 법령의 최신 상태가 표로 정리되어 나타납니다.
-    * 결과표 아래 다운로드 버튼으로 **Excel, HTML, MS Word(.docx)** 형식의 종합 보고서를 저장할 수 있습니다.
-
-    **📍 4단계: 설계범위 기반 인허가 분석**
-    * 시설 선택 → 규모 입력 (또는 설계보고서 PDF 자동 추출) → 24개 인허가의 필수 / 해당 가능 판정, 단계별 로드맵, Excel 을 제공합니다.
-    * 판정은 입력값에 따른 1차 검토 결과입니다. '해당 가능' 항목은 각 시행령 별표의 규모 기준과 관계기관 사전협의로 최종 확인하십시오.
-
-    **📍 5단계: 설계 시행 주요 인허가 상세 가이드 열람**
-    * 화면 아래 상세 가이드에서 각 인허가의 개요, 실시근거, 대상사업 및 협의시기, 협의기관, 평가항목과 대상범위 · 근거 위치(법 → 시행령 → 별표)를 확인합니다.
-    * **6. 절차 및 양식 보기** 를 펼치면 현행 법령(2026.10 확인) 기준 절차 흐름도와 법제처 원문 링크가 포함된 법정 양식 정보를 볼 수 있습니다.
-    """)
-        st.markdown("---")
-        st.markdown("##### 🗂 상세 변경 이력")
-        st.markdown("""
-* **10.08** 화면 양식 통일 (10번 EP 기준)
-* **10.12** 현행 법령(2026.10) 기준 인허가 절차 흐름도 24개 분야 31종 신규 도식화 · 근거 법령 정정, '설계범위 기반 인허가 분석'(시설·규모 입력 또는 설계보고서 PDF 자동 추출 → 24개 인허가 판정 · 단계별 로드맵 · Excel), 항목별 대상범위 · 근거 위치 표, 발주방식(일반 / 턴키·기술제안)별 시기 · 수행 주체 구분
-* **10.20** 인허가 로드맵 그림 범례 색 구분 (■ 파랑 = 필수 · ■ 주황 = 해당 가능) · '2. 분석 결과' 판정 기준 설명 상자 · 법령 검색에 없으면 행정규칙(훈령·예규·고시)에서 다시 찾음
-* **10.23** 검증보고서 22-25번 반영 — 법령명 완전일치 항목 채택(없으면 '확인 필요'), 공사 위치 '육역'인데 해역 시설이 있으면 경고, 민간 사업 VE '해당 가능', 총공사비 소수 표시, 기후영향평가 근거 법령 = 탄소중립기본법
-* **10.30** 법제처 공용 'test' 키 거부(사용자 정보 검증 실패)에 맞춰 — 등록된 법제처 키(Secrets) 자동 사용, 조회 거부 사유를 표 · 안내 상자에 표시
-* **11.02** 앱 화면에 사용설명서 추가
-    """)
 
 
 _pj_end()                   # [공통블록] 입력란 아래(또는 화면 맨 아래) 💾 · 🧾 · 📚
