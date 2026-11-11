@@ -837,14 +837,194 @@ def _pj_stamp_docx(b, lines):
     return out.getvalue()
 
 
-def _pj_stamp_html(s, lines):
+_PJ_MJ_NAME = "mathjax-3.2.2-tex-svg.js"
+
+
+def _pj_mathjax_js():
+    """[2026-11-10] HTML 보고서에 넣을 MathJax 3.2.2 (SVG 판 — 글꼴 파일 없이 인터넷 없어도 수식 표시, 검증보고서 R-2).
+    찾는 곳 : 앱 폴더 · 그 아래 _lib · 작업 폴더 pages/_lib · _공통블록/lib. 프로세스에 한 번 읽음."""
+    import sys as _sy, os as _o
+    if hasattr(_sy, "_pj_mj_js"):
+        return _sy._pj_mj_js
+    js = None
+    try:
+        here = _o.path.dirname(_o.path.abspath(__file__))
+    except Exception:  # noqa: BLE001
+        here = _o.getcwd()
+    for d in (here, _o.path.join(here, "_lib"), _o.path.join(_o.getcwd(), "pages", "_lib"), _o.path.join(_o.getcwd(), "_lib"),
+              _o.path.join(_o.path.dirname(here), "_공통블록", "lib"), _o.path.join(_o.getcwd(), "_공통블록", "lib")):
+        p = _o.path.join(d, _PJ_MJ_NAME)
+        if _o.path.exists(p):
+            try:
+                js = open(p, encoding="utf-8").read().replace("</script", "<\\/script")
+                break
+            except Exception:  # noqa: BLE001
+                js = None
+    _sy._pj_mj_js = js
+    return js
+
+
+def _pj_inline_mathjax(s):
+    """인터넷에서 MathJax 를 부르는 <script src=…mathjax@3…> 를 파일 안에 넣은 스크립트로 바꿈 (파일이 없으면 그대로)"""
+    import re as _re
+    rx = _re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']https?://cdn\.jsdelivr\.net/npm/mathjax@3[^"']*["'][^>]*>\s*</script>""", _re.I)
+    if not rx.search(s):
+        return s
+    js = _pj_mathjax_js()
+    if not js:
+        return s
+    return rx.sub(lambda m: "<script id=\"MathJax-script\">/* MathJax 3.2.2 tex-svg (내장 — 인터넷 없이 수식 표시) */\n" + js + "\n</script>", s, count=1)
+
+
+def _pj_stamp_html(s, lines, inline_mj=False):
     import html as _h
+    if inline_mj:
+        try:
+            s = _pj_inline_mathjax(s)
+        except Exception:  # noqa: BLE001
+            pass
     if "🧾 계산 정보" in s or not any(t in s.lower() for t in ("<html", "<body", "<table", "<div")):
         return s
     foot = ("<div style='margin-top:24px;padding:8px 12px;border-top:2px solid #94a3b8;font-size:10pt;color:#334155'>"
             "<b>🧾 계산 정보 (QA/QC)</b><br>" + "<br>".join(f"{_h.escape(a)} : {_h.escape(str(v))}" for a, v in lines) + "</div>")
     j = s.lower().rfind("</body>")
     return s[:j] + foot + s[j:] if j >= 0 else s + foot
+
+
+_PJ_SUB_RX = None
+
+
+def _pj_xl_sub(b):
+    """[2026-11-10] 내려받는 Excel 의 글자 칸 기호를 아랫첨자로 (H₁/₃ · T₁/₃ · H₀′ · L₀ · Hₘₐₓ · Kₛ …, 메모 subscripts-always).
+    파일 XML (sharedStrings) 만 고침 — 차트 · 그림 · 수식 그대로, 글자 자체는 같아 MATCH 등도 그대로. 칸 글꼴(이름 · 크기 · 굵기 · 색) 유지.
+    이미 서식 글자(rich text)인 칸 · 수식 칸은 손대지 않음. 실패하면 원래 파일."""
+    import io as _io, re as _re, zipfile as _zf
+    from xml.sax.saxutils import escape as _esc, unescape as _unesc
+    global _PJ_SUB_RX
+    try:
+        if _PJ_SUB_RX is None:
+            _PJ_SUB_RX = _re.compile(r"(?<![A-Za-z0-9_])(H1/250|H1/10|H1/3|T1/3|H2%|Hmax|H0[′']|L0|Ks|Kr)(?![A-Za-z0-9_])")
+        import html as _html
+        _unesc = _html.unescape                      # &#44284; 같은 숫자 참조까지
+        zin = _zf.ZipFile(_io.BytesIO(b))
+        names = zin.namelist()
+        if "xl/styles.xml" not in names:
+            return b
+        sst = zin.read("xl/sharedStrings.xml").decode("utf-8") if "xl/sharedStrings.xml" in names else ""
+        items = list(_re.finditer(r"<si\b[^>]*?(?:/>|>(.*?)</si>)", sst, _re.S))
+        plain = {}
+        for i, m in enumerate(items):
+            body = m.group(1) or ""
+            if _re.search(r"<r\b", body):
+                continue
+            t = "".join(_unesc(x) for x in _re.findall(r"<t\b[^>]*>(.*?)</t>", body, _re.S))
+            if _PJ_SUB_RX.search(t):
+                plain[i] = t
+        stx = zin.read("xl/styles.xml").decode("utf-8")
+        fm = _re.search(r"<fonts\b[^>]*>(.*?)</fonts>", stx, _re.S)
+        fonts = _re.findall(r"<font\b[^>]*/>|<font\b[^>]*>.*?</font>", fm.group(1), _re.S) if fm else []
+        cx = _re.search(r"<cellXfs\b[^>]*>(.*?)</cellXfs>", stx, _re.S)
+        xfs = _re.findall(r"<xf\b[^>]*/>|<xf\b[^>]*>.*?</xf>", cx.group(1), _re.S) if cx else []
+        xf_font = [int((_re.search(r'\bfontId="(\d+)"', x) or [0, "0"])[1]) for x in xfs]
+
+        def rpr(fid, sub):
+            f = fonts[fid] if 0 <= fid < len(fonts) else ""
+            g = lambda tag: (_re.search(rf"<{tag}\b[^>]*/>", f) or [None])[0]
+            parts = []
+            nm = _re.search(r'<name\b[^>]*\bval="([^"]*)"', f)
+            if nm:
+                parts.append(f'<rFont val="{nm.group(1)}"/>')
+            for tag in ("charset", "family", "b", "i", "strike", "outline", "shadow", "condense", "extend", "color", "sz", "u"):
+                v = g(tag)
+                if v:
+                    parts.append(v)
+            if sub:
+                parts.append('<vertAlign val="subscript"/>')
+            sc = g("scheme")
+            if sc:
+                parts.append(sc)
+            return "<rPr>" + "".join(parts) + "</rPr>" if parts else ""
+
+        def runs(text, fid):
+            out, k = [], 0
+            for m in _PJ_SUB_RX.finditer(text):
+                if m.start() > k:
+                    out.append((text[k:m.start()], 0))
+                s = m.group(1)
+                if s.startswith("H0"):
+                    out += [("H", 0), ("0", 1), (s[2:], 0)]
+                else:
+                    out += [(s[0], 0), (s[1:], 1)]
+                k = m.end()
+            if k < len(text):
+                out.append((text[k:], 0))
+            return "".join(f'<r>{rpr(fid, sb)}<t xml:space="preserve">{_esc(tx)}</t></r>' for tx, sb in out if tx)
+        new_si, key2idx = [], {}
+        n0 = len(items)
+        rxc = _re.compile(r'<c\b([^>]*?)>\s*<v>(\d+)</v>\s*</c>', _re.S)
+        rxi = _re.compile(r'<c\b([^>]*?\bt="inlineStr"[^>]*)>\s*<is>(.*?)</is>\s*</c>', _re.S)
+        sheets = [n for n in names if n.startswith("xl/worksheets/") and n.endswith(".xml")]
+        new_sheets = {}
+
+        def _fid(attrs):
+            sm = _re.search(r'\bs="(\d+)"', attrs)
+            return xf_font[int(sm.group(1))] if sm and int(sm.group(1)) < len(xf_font) else 0
+        for sn in sheets:
+            x = zin.read(sn).decode("utf-8")
+            changed = [False]
+
+            def _cell(m):
+                attrs, idx = m.group(1), int(m.group(2))
+                if 't="s"' not in attrs or idx not in plain:
+                    return m.group(0)
+                fid = _fid(attrs)
+                kk = (idx, fid)
+                if kk not in key2idx:
+                    key2idx[kk] = n0 + len(new_si)
+                    new_si.append("<si>" + runs(plain[idx], fid) + "</si>")
+                changed[0] = True
+                return f"<c{attrs}><v>{key2idx[kk]}</v></c>"
+
+            def _inl(m):
+                attrs, body = m.group(1), m.group(2)
+                if _re.search(r"<r\b", body):
+                    return m.group(0)
+                t = "".join(_unesc(q) for q in _re.findall(r"<t\b[^>]*>(.*?)</t>", body, _re.S))
+                if not _PJ_SUB_RX.search(t):
+                    return m.group(0)
+                changed[0] = True
+                return f"<c{attrs}><is>{runs(t, _fid(attrs))}</is></c>"
+            y = rxi.sub(_inl, rxc.sub(_cell, x) if plain else x)
+            if changed[0]:
+                new_sheets[sn] = y
+        if not new_sheets:
+            return b
+        sst2 = sst
+        if new_si:
+            sst2 = sst.replace("</sst>", "".join(new_si) + "</sst>", 1)
+            sst2 = _re.sub(r'\buniqueCount="\d+"', f'uniqueCount="{n0 + len(new_si)}"', sst2, 1)
+        out = _io.BytesIO()
+        with _zf.ZipFile(out, "w", _zf.ZIP_DEFLATED) as zo:
+            for it in zin.infolist():
+                if it.filename == "xl/sharedStrings.xml" and new_si:
+                    zo.writestr(it, sst2.encode("utf-8"))
+                elif it.filename in new_sheets:
+                    zo.writestr(it, new_sheets[it.filename].encode("utf-8"))
+                else:
+                    zo.writestr(it, zin.read(it.filename))
+        return out.getvalue()
+    except Exception:  # noqa: BLE001
+        return b
+
+
+def _pj_xl_cache(b):
+    """[2026-11-10] 내려받는 Excel 에 수식 계산값도 함께 (미리보기 빈칸 방지) — 실패하거나 너무 크면 원래 파일 그대로"""
+    try:
+        if len(b) > 12_000_000:
+            return b
+        return _pjx().xl_cache(b)
+    except Exception:  # noqa: BLE001
+        return b
 
 
 def _pj_stamp(data, fname, S=None):
@@ -856,16 +1036,17 @@ def _pj_stamp(data, fname, S=None):
             return data
         raw = data.getvalue() if hasattr(data, "getvalue") else data
         if ext in ("xlsx", "xlsm") and isinstance(raw, (bytes, bytearray)):
-            return _pj_stamp_xlsx(bytes(raw), lines)
+            return _pj_stamp_xlsx(_pj_xl_sub(_pj_xl_cache(bytes(raw))), lines)
         if ext == "docx" and isinstance(raw, (bytes, bytearray)):
             return _pj_stamp_docx(bytes(raw), lines)
         if ext in ("html", "htm", "doc"):
+            _mj = ext in ("html", "htm")          # [2026-11-10] HTML 만 MathJax 내장 (Word 는 스크립트 안 돌림)
             if isinstance(raw, str):
-                return _pj_stamp_html(raw, lines)
+                return _pj_stamp_html(raw, lines, _mj)
             if isinstance(raw, (bytes, bytearray)) and not bytes(raw[:8]).startswith(b"\xd0\xcf\x11\xe0"):
                 pre = b"\xef\xbb\xbf" if bytes(raw[:3]) == b"\xef\xbb\xbf" else b""
                 t = bytes(raw[len(pre):]).decode("utf-8")
-                return pre + _pj_stamp_html(t, lines).encode("utf-8")
+                return pre + _pj_stamp_html(t, lines, _mj).encode("utf-8")
         if ext == "json":
             import json as _js
             t = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
@@ -877,6 +1058,180 @@ def _pj_stamp(data, fname, S=None):
     except Exception:  # noqa: BLE001 — 계산 정보를 못 붙여도 파일은 그대로 내려받기
         pass
     return data
+
+
+class _PjSheet:
+    """[2026-11-10] 납품용 Excel 계산서 모눈 시트 (16번 블록식 · 29번과 같은 양식) — 42열 모눈 · A4 세로 · 쪽 번호
+    h1 (남색 밑줄 제목) · h2 · h3 · note · panel (공식 / 기호 설명 / 근거 상자) · result (초록 결과 상자) ·
+    inp (노란 바탕 · 파란 글씨 입력 칸 + 이름) · header · box · page_break · finish · png (그림)"""
+    NCOL = 42
+
+    def __init__(self, wb, name, head=""):
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+        from openpyxl.worksheet.properties import PageSetupProperties
+        self.A, self.B, self.F, self.P, self.S, self.CL = Alignment, Border, Font, PatternFill, Side, get_column_letter
+        self.wb, self.name = wb, name
+        self.ws = ws = wb.create_sheet(name)
+        self.r = 1
+        self.GRAY, self.INF = PatternFill("solid", fgColor="D9D9D9"), PatternFill("solid", fgColor="FFF2CC")
+        self.FH, self.FB = PatternFill("solid", fgColor="DCE6F2"), PatternFill("solid", fgColor="F7F9FC")
+        self.RES, self.HI = PatternFill("solid", fgColor="E2EFDA"), PatternFill("solid", fgColor="FCE4D6")
+        self.THIN, self.HAIR = Side(style="thin"), Side(style="hair")
+        self.MED, self.NAV = Side(style="medium", color="1E3A8A"), Side(style="thin", color="1E3A8A")
+        ws.sheet_format.defaultRowHeight = 16.5
+        ws.sheet_format.customHeight = True
+        ws.column_dimensions["A"].width = 1.3
+        for c in range(2, self.NCOL + 1):
+            ws.column_dimensions[get_column_letter(c)].width = 2.35
+        for c in range(self.NCOL + 1, self.NCOL + 20):
+            ws.column_dimensions[get_column_letter(c)].width = 10
+        ws.sheet_view.showGridLines = False
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.orientation = "portrait"
+        ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+        ws.page_margins.left = ws.page_margins.right = 0.5
+        ws.page_margins.top = ws.page_margins.bottom = 0.6
+        ws.oddFooter.center.text = "- &P / &N -"
+        ws.oddFooter.center.size = 9
+        if head:
+            ws.oddHeader.right.text = head
+            ws.oddHeader.right.size = 8
+
+    def font(self, size=9, bold=False, color="000000"):
+        return self.F(name="맑은 고딕", size=size, bold=bold, color=color)
+
+    def ref(self, c, r):
+        return f"'{self.name}'!${self.CL(c)}${r}"
+
+    def put(self, r, c1, c2, v, fmt=None, bold=False, h="center", fill=None, color="000000", size=9, wrap=False, r2=None):
+        ws = self.ws
+        c2, r2 = c2 or c1, r2 or r
+        if c2 > c1 or r2 > r:
+            ws.merge_cells(start_row=r, start_column=c1, end_row=r2, end_column=c2)
+        cell = ws.cell(r, c1, v)
+        cell.font = self.font(size, bold, color)
+        cell.alignment = self.A(horizontal=h, vertical="center", wrap_text=wrap)
+        if fmt:
+            cell.number_format = fmt
+        if fill:
+            for rr in range(r, r2 + 1):
+                for cc in range(c1, c2 + 1):
+                    ws.cell(rr, cc).fill = fill
+        return cell
+
+    def dname(self, nm, c, r):
+        from openpyxl.workbook.defined_name import DefinedName
+        self.wb.defined_names[nm] = DefinedName(nm, attr_text=self.ref(c, r))
+
+    def inp(self, r, c1, c2, v, fmt="0.000", name=None, h="center"):
+        self.put(r, c1, c2, v, fmt=fmt, bold=True, color="0000FF", fill=self.INF, h=h)
+        if name:
+            self.dname(name, c1, r)
+        return self.ref(c1, r)
+
+    def h1(self, t):
+        self.put(self.r, 2, self.NCOL, t, size=13, bold=True, color="1E3A8A", h="left")
+        for c in range(2, self.NCOL + 1):
+            self.ws.cell(self.r, c).border = self.B(bottom=self.MED)
+        self.ws.row_dimensions[self.r].height = 24
+        self.r += 2
+
+    def h2(self, t):
+        self.put(self.r, 2, self.NCOL, t, size=10.5, bold=True, h="left")
+        self.ws.row_dimensions[self.r].height = 19
+        self.r += 1
+
+    def h3(self, t):
+        self.put(self.r, 3, self.NCOL, t, size=9.5, bold=True, color="595959", h="left")
+        self.r += 1
+
+    def note(self, t, c=3, color="595959", size=8.5, bold=False):
+        import math as _m
+        units = sum(1.75 if ord(ch) > 0x2E80 else 0.9 for ch in str(t)) * size / 9.0
+        lines = max(1, _m.ceil(units / ((self.NCOL - c + 1) * 2.35)))
+        self.put(self.r, c, self.NCOL, t, h="left", color=color, size=size, wrap=lines > 1, bold=bold)
+        if lines > 1:
+            self.ws.row_dimensions[self.r].height = 13.5 * lines + 2
+        self.r += 1
+
+    def gap(self, n=1):
+        self.r += n
+
+    def box(self, r1, r2, c1, c2, hdr_rows=0):
+        o, i_ = self.THIN, self.HAIR
+        for rr in range(r1, r2 + 1):
+            for cc in range(c1, c2 + 1):
+                self.ws.cell(rr, cc).border = self.B(
+                    left=o if cc == c1 else i_, right=o if cc == c2 else i_,
+                    top=o if (rr == r1 or (hdr_rows and rr == r1 + hdr_rows)) else i_,
+                    bottom=o if (rr == r2 or (hdr_rows and rr == r1 + hdr_rows - 1)) else i_)
+
+    def header(self, r, spans, h=None):
+        for c1, c2, t in spans:
+            self.put(r, c1, c2, t, bold=True, fill=self.GRAY, wrap=True)
+        if h:
+            self.ws.row_dimensions[r].height = h
+
+    def panel(self, title, lines):
+        """공식 · 기호 · 근거 상자 — lines : 문자열 (▶ 로 시작하면 굵게) 또는 (기호, 설명) 튜플"""
+        import math as _m
+        N, r0 = self.NCOL, self.r
+        self.put(r0, 3, N - 1, "■ " + title, bold=True, color="1E3A8A", fill=self.FH, h="left", size=9.5)
+        r = r0 + 1
+        for ln in lines:
+            if isinstance(ln, tuple):
+                sym, desc = ln
+                self.put(r, 4, 11, sym, fill=self.FB, bold=True, h="left")
+                self.put(r, 12, N - 1, desc, fill=self.FB, h="left", wrap=len(desc) > 52)
+                if len(desc) > 52:
+                    self.ws.row_dimensions[r].height = 13.5 * _m.ceil(len(desc) / 52) + 3
+            else:
+                self.put(r, 4, N - 1, ln, fill=self.FB, h="left", bold=ln.startswith("▶"), wrap=len(ln) > 78)
+                if len(ln) > 78:
+                    self.ws.row_dimensions[r].height = 13.5 * _m.ceil(len(ln) / 78) + 3
+            r += 1
+        for rr in range(r0, r):
+            for cc in range(3, N):
+                self.ws.cell(rr, cc).border = self.B(
+                    left=self.NAV if cc == 3 else None, right=self.NAV if cc == N - 1 else None,
+                    top=self.NAV if rr == r0 else (self.HAIR if rr == r0 + 1 else None), bottom=self.NAV if rr == r - 1 else None)
+        self.r = r + 1
+
+    def result(self, v, c1=3, h=22):
+        N = self.NCOL
+        self.put(self.r, c1, N - 1, v, bold=True, fill=self.RES, h="left", size=10 if c1 == 3 else 9)
+        if c1 > 3:
+            self.ws.cell(self.r, c1).alignment = self.A(horizontal="left", vertical="center", shrink_to_fit=True)
+        for cc in range(c1, N):
+            self.ws.cell(self.r, cc).border = self.B(top=self.THIN, bottom=self.THIN, left=self.THIN if cc == c1 else None,
+                                                     right=self.THIN if cc == N - 1 else None)
+        if c1 == 3 and h:
+            self.ws.row_dimensions[self.r].height = h
+        self.r += 2
+
+    def png(self, data, col=3, w=560, h=280, row=None):
+        """그림 넣기 → 차지한 행 수 (못 넣으면 0)"""
+        try:
+            import io as _io
+            from openpyxl.drawing.image import Image as _XI
+            im = _XI(_io.BytesIO(data))
+            im.width, im.height = w, h
+            self.ws.add_image(im, f"{self.CL(col)}{row or self.r}")
+            n = int(h / 21) + 1
+            if row is None:
+                self.r += n + 1
+            return n
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def page_break(self):
+        from openpyxl.worksheet.pagebreak import Break
+        self.ws.row_breaks.append(Break(id=self.r - 1))
+
+    def finish(self):
+        self.ws.print_area = f"A1:{self.CL(self.NCOL)}{max(self.r, 2)}"
 
 
 # [2026-10-23] Excel 수식 계산기 (Excel 없이 수식 값을 구함 — 일반 판 고정값 · 계산값 저장용)
@@ -1177,6 +1532,9 @@ def _text(v, fmt):
             f = secs[0]
     mm = _re.match(r"^([^0#,.]*)(.*?)([^0#,.]*)$", f)
     pre, f, suf = (mm.group(1), mm.group(2), mm.group(3)) if mm else ("", f, "")
+    _pct = _re.sub(r'"[^"]*"', "", pre + suf).count("%")     # [2026-11-10] 따옴표 밖 % = 100 배 (Excel 퍼센트 서식)
+    if _pct:
+        x = x * 100.0 ** _pct
     pre, suf = pre.replace(chr(34), ""), suf.replace(chr(34), "")
     if pre or suf:
         return pre + _text(x, f) + suf
@@ -2083,6 +2441,62 @@ def xl_rewrite(xlsx_bytes, freeze=None, protect=False, hide=()):
             elif it.filename == "xl/calcChain.xml":
                 continue
             zo.writestr(it, data)
+    return out.getvalue()
+
+
+def xl_cache(xlsx_bytes):
+    """[2026-11-10] 수식은 그대로 두고 계산값만 함께 저장 (미리보기 · 휴대폰 뷰어에서 빈칸 방지, 검증보고서 R-1).
+    계산기가 못 푼 칸(오류)은 값을 넣지 않음 (그 칸만 지금처럼 빈칸), Excel 로 열면 원래대로 전체 재계산 (fullCalcOnLoad)."""
+    import zipfile as _zf
+    from xml.sax.saxutils import escape as _esc
+    zin = _zf.ZipFile(_io.BytesIO(xlsx_bytes))
+    sheets = _sheet_files(zin)
+    for fn in sheets:                       # 이미 계산값이 들어 있으면 (두 판 Excel 등) 그대로
+        if _re.search(r"</f>\s*<v>[^<]", zin.read(fn).decode("utf-8", "ignore")):   # 빈 <v></v> 는 값 없음
+            return xlsx_bytes
+    wb, res = evaluate(xlsx_bytes)
+    by_sheet = {}
+    for (sh, r, c), v in res.items():
+        if isinstance(v, _ErrV) or v is None:
+            continue
+        by_sheet.setdefault(sh, {})[f"{_n2col(c)}{r}"] = v
+
+    def vxml(v):
+        if isinstance(v, bool):
+            return ' t="b"', f"<v>{1 if v else 0}</v>"
+        if isinstance(v, (int, float)):
+            return "", f"<v>{repr(float(v))}</v>"
+        return ' t="str"', f"<v>{_esc(str(v))}</v>"
+
+    def cellxml(m, vals):
+        attrs, body = m.group(1), m.group(2)
+        mr = _re.search(r'\br="([A-Z]+\d+)"', attrs)
+        if not mr or "<f" not in body or mr.group(1) not in vals or _re.search(r"<v>[^<]", body):
+            return m.group(0)
+        attrs = _re.sub(r'\s+t="[^"]*"', "", attrs)
+        t_, vx = vxml(vals[mr.group(1)])
+        fm = _re.search(r"<f\b[^>]*>.*?</f>|<f\b[^>]*/>", body, _re.S)
+        return f"<c{attrs}{t_}>{fm.group(0) if fm else ''}{vx}</c>"
+    out = _io.BytesIO()
+    rx = _re.compile(r"<c\b([^>]*?)(?:/>|>(.*?)</c>)", _re.S)
+    with _zf.ZipFile(out, "w", _zf.ZIP_DEFLATED) as zo:
+        for it in zin.infolist():
+            data = zin.read(it.filename)
+            if it.filename in sheets and by_sheet.get(sheets[it.filename]):
+                vals = by_sheet[sheets[it.filename]]
+                data = rx.sub(lambda m: cellxml(m, vals) if m.group(2) is not None else m.group(0),
+                              data.decode("utf-8")).encode("utf-8")
+            elif it.filename == "xl/workbook.xml":
+                x = data.decode("utf-8")
+                if "fullCalcOnLoad" not in x:
+                    if _re.search(r"<(?:\w+:)?calcPr\b", x):
+                        x = _re.sub(r"<((?:\w+:)?calcPr)\b", r'<\1 fullCalcOnLoad="1"', x, 1)
+                    else:
+                        x = _re.sub(r"</(\w+:)?workbook>", lambda m: f'<{m.group(1) or ""}calcPr fullCalcOnLoad="1"/></{m.group(1) or ""}workbook>', x, 1)
+                data = x.encode("utf-8")
+            elif it.filename == "xl/calcChain.xml":
+                continue
+            zo.writestr(it, data)
     return out.getvalue()'''
 _PJX_NS = {}
 
@@ -2156,6 +2570,36 @@ def _pj_own_put(hook, project, data):
     except Exception:  # noqa: BLE001
         pass
     return data
+
+
+def _pj_keep_deferred(mm, items):
+    """[2026-11-09] 💾 저장 단추의 지연 다운로드 등록을 프로세스에 잠깐(최근 300개) 보관.
+    Streamlit 은 상자가 다시 그려질 때 옛 등록을 지움 → 느린 서버(Cloud)에서 다시 그려지는 사이에 누른 첫 누름이
+    '등록 없음'으로 사라짐. 실행 때 등록이 없으면 보관본을 되넣어 그대로 저장되게 함 (내용 · 파일 이름은 누르는 순간 값)."""
+    import sys as _sy, collections as _co
+    keep = getattr(_sy, "_pj_dl_keep", None)
+    if keep is None:
+        keep = _co.OrderedDict()
+        _sy._pj_dl_keep = keep
+    for k, e in items:
+        keep[k] = e
+        keep.move_to_end(k)
+    while len(keep) > 300:
+        keep.popitem(last=False)
+    if getattr(mm, "_pj_keep_patched", False):
+        return
+    orig = mm.execute_deferred
+
+    def ex(file_id, _o=orig, _m=mm):
+        try:
+            with _m._lock:
+                if file_id not in _m._deferred_callables and file_id in _sy._pj_dl_keep:
+                    _m._deferred_callables[file_id] = _sy._pj_dl_keep[file_id]
+        except Exception:  # noqa: BLE001
+            pass
+        return _o(file_id)
+    mm.execute_deferred = ex
+    mm._pj_keep_patched = True
 
 
 def _pj_patch_download():
@@ -2925,24 +3369,53 @@ def _pj_lib_put(body):
             fp = _pj_finger({"o": {k: v for k, v in own.items() if k not in ("saved", "_계산정보")}})
         else:
             fp = _pj_finger({"i": body.get("inputs"), "t": body.get("tables")})
-        path = _os.path.join(_pj_lib_dir(True), f"{fp}.json")
-        old = {}
-        if _os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                old = _js.load(f)
-        else:
-            b = _pj_gh_get(_pj_lib_ghdir() + f"/{fp}.json")
+        d = _pj_lib_dir(True)
+        # [2026-11-11] 파일 이름 = 프로젝트명 (예 '동방파제 두부.json', 같은 이름에 다른 입력이면 ' (2)') — 같은 입력인지는 파일 안 지문(finger)으로
+        fn, old = None, {}
+        for f_ in sorted(_os.listdir(d)):
+            if f_.endswith(".json"):
+                try:
+                    with open(_os.path.join(d, f_), encoding="utf-8") as f:
+                        r_ = _js.load(f)
+                    if r_.get("finger") == fp:
+                        fn, old = f_, r_
+                        break
+                except Exception:  # noqa: BLE001
+                    pass
+        if not old:
+            b = _pj_gh_get(_pj_lib_ghdir() + f"/{fp}.json")          # 예전 이름 (지문.json) — 저장소에만 있을 때
             if b:
-                old = _js.loads(b.decode("utf-8"))
+                old, fn = _js.loads(b.decode("utf-8")), f"{fp}.json"
+        legacy = fn == f"{fp}.json"                                  # 예전 이름이면 새 이름으로 옮김
         now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         rec = dict(body, finger=fp, first=old.get("first", body.get("saved") or now), last=now,
                    count=int(old.get("count", 0)) + 1,
                    project=str(body.get("project") or old.get("project") or "").strip())
+        if fn is None or legacy:
+            import re as _re
+            base = _re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", rec["project"] or str(_PJ.get("short") or _PJ.get("app") or "입력")).strip()[:80] or "입력"
+            gh_names = set()
+            try:
+                gh_names = set(_pj_gh_list(_pj_lib_ghdir()) or ())
+            except Exception:  # noqa: BLE001
+                pass
+            k, new = 1, f"{base}.json"
+            while _os.path.exists(_os.path.join(d, new)) or new in gh_names:
+                k += 1
+                new = f"{base} ({k}).json"
+            if legacy:
+                try:
+                    _os.remove(_os.path.join(d, fn))
+                except Exception:  # noqa: BLE001
+                    pass
+                _pj_gh_del(_pj_lib_ghdir() + f"/{fn}")
+            fn = new
+        path = _os.path.join(d, fn)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             _js.dump(rec, f, ensure_ascii=False, indent=1)
         _os.replace(tmp, path)
-        _pj_gh_put(_pj_lib_ghdir() + f"/{fp}.json", _js.dumps(rec, ensure_ascii=False, indent=1).encode("utf-8"))
+        _pj_gh_put(_pj_lib_ghdir() + f"/{fn}", _js.dumps(rec, ensure_ascii=False, indent=1).encode("utf-8"))
     except Exception:  # noqa: BLE001 — 보관 실패로 저장 · 불러오기가 막히지 않게
         pass
 
@@ -2990,7 +3463,7 @@ def _pj_lib_list():
             if fn.endswith(".json"):
                 try:
                     with open(_os.path.join(d, fn), encoding="utf-8") as f:
-                        out.append(_js.load(f))
+                        out.append(dict(_js.load(f), _fn=fn))      # [2026-11-11] 파일 이름 (지우기용)
                 except Exception:  # noqa: BLE001
                     pass
     except Exception:  # noqa: BLE001
@@ -3166,20 +3639,21 @@ def _pj_lib_ui():
                  format_func=lab.get, key="_pj_lib_pick", on_change=_pj_lib_load_cb, placeholder="보관된 입력 선택")
     dl = st.selectbox("🗑 지울 입력제원 — 매니저", list(lab), index=None, format_func=lab.get, key="_pj_lib_delpick",
                       placeholder="지울 항목 선택")
+    _fnm = {r["finger"]: (r.get("_fn") or f"{r['finger']}.json") for r in recs}      # [2026-11-11] 지문 → 파일 이름 (프로젝트명 · 예전 지문 이름)
     if _pj_confirm("🗑 고른 항목 지우기", "_pj_lib_del", f"'{lab.get(dl, '')}' 1건을 지웁니다", disabled=dl is None):
         try:
-            _os.remove(_os.path.join(_pj_lib_dir(), f"{dl}.json"))
+            _os.remove(_os.path.join(_pj_lib_dir(), _fnm.get(dl, f"{dl}.json")))
         except Exception:  # noqa: BLE001
             pass
-        _pj_gh_del(_pj_lib_ghdir() + f"/{dl}.json")
+        _pj_gh_del(_pj_lib_ghdir() + f"/{_fnm.get(dl, f'{dl}.json')}")
         st.rerun()
     if _pj_confirm("🗑 보관함 모두 지우기", "_pj_lib_clear", f"이 앱의 보관 입력제원 {len(recs)}건을 모두 지웁니다"):
         for x in recs:
             try:
-                _os.remove(_os.path.join(_pj_lib_dir(), f"{x['finger']}.json"))
+                _os.remove(_os.path.join(_pj_lib_dir(), _fnm[x["finger"]]))
             except Exception:  # noqa: BLE001
                 pass
-            _pj_gh_del(_pj_lib_ghdir() + f"/{x['finger']}.json")
+            _pj_gh_del(_pj_lib_ghdir() + f"/{_fnm[x['finger']]}")
         st.rerun()
 
 
@@ -3235,13 +3709,18 @@ def _pj_panel(c):
                                    help="저장 파일 이름 = 프로그램명-프로젝트명(저장날짜).json — 입력한 뒤 Enter (또는 칸 밖을 한 번 누름) 하고 저장")
                 _fn = _pj_fname(pn)
                 _fn_box[0] = _fn
-                # [2026-11-03] 이름이 바뀌면 단추도 새로 (같은 key 면 옛 파일 이름이 남아 프로젝트명이 빠졌음)
+                # [2026-11-09] 단추 key 고정 — 프로젝트명을 쓰고 바로 누르면 칸을 벗어나며 상자가 다시 그려지는데,
+                #   key 가 파일 이름 따라 바뀌면 단추가 새것으로 바뀌어 첫 누름이 사라졌음 (두 번 눌러야 저장).
+                #   파일 이름은 누르는 순간 _save 가 새 프로젝트명으로 바꾸므로 key 를 바꿀 필요 없음.
                 st.download_button("💾 입력 저장 (JSON)", _save, file_name=_fn, mime="application/json",
-                                   key="_pj_dl_" + _pj_finger({"f": _fn})[:8], width="stretch")
+                                   key="_pj_dl_save", width="stretch")
                 try:                                  # [2026-11-03] 방금 등록된 이 단추의 지연 다운로드 정보를 붙잡아 둠 (누르는 순간 파일 이름을 바꾸려고)
                     from streamlit import runtime as _rt
-                    _fn_box += [_e for _e in list(getattr(_rt.get_instance().media_file_mgr, "_deferred_callables", {}).values())
-                                if _e.get("filename") == _fn]
+                    _mm = _rt.get_instance().media_file_mgr
+                    _mine = [(_k, _e) for _k, _e in list(getattr(_mm, "_deferred_callables", {}).items())
+                             if _e.get("callable") is _save or _e.get("filename") == _fn]
+                    _fn_box += [_e for _k, _e in _mine]
+                    _pj_keep_deferred(_mm, _mine)     # [2026-11-09] 다시 그려져 지워진 옛 단추를 눌러도 저장되게
                 except Exception:  # noqa: BLE001
                     pass
                 st.caption(f"저장될 파일 이름 : {_fn}")
