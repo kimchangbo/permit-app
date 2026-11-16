@@ -903,7 +903,8 @@ def _pj_xl_sub(b):
     global _PJ_SUB_RX
     try:
         if _PJ_SUB_RX is None:
-            _PJ_SUB_RX = _re.compile(r"(?<![A-Za-z0-9_])(H1/250|H1/10|H1/3|T1/3|H2%|Hmax|H0[′']|L0|Ks|Kr)(?![A-Za-z0-9_])")
+            _PJ_SUB_RX = _re.compile(r"(?<![A-Za-z0-9_])(H1/250|H1/10|H1/3|T1/3|H2%|Hmax|H0[′']|Ru2%|Dn50|L0|Ks|Kr|"
+                                     r"Lpp|Hs|HD|Hb|hb|hc|hs|kh|Rc|Sr|C0|Cf|Fs|Fd|Ph|Pw|Pu|Pv|Vc|Uc|Tm|Tp|Ts|T0|H0|Ka|Mv|Mh|Dn|Cb|Cr|Cm|Ce|Ns|Lm)(?![A-Za-z0-9_])")   # [2026-11-16] 기호 넓힘 (Excel 15개 점검)
         import html as _html
         _unesc = _html.unescape                      # &#44284; 같은 숫자 참조까지
         zin = _zf.ZipFile(_io.BytesIO(b))
@@ -1027,6 +1028,47 @@ def _pj_xl_cache(b):
         return b
 
 
+def _pj_xl_view(b):
+    """[2026-11-11] 내려받는 Excel 을 열면 '페이지 나누기 미리보기' (인쇄 영역 · 쪽 경계가 보이게).
+    시트 XML 의 sheetView 만 고침 — 차트 · 그림 · 수식 그대로. 앱이 정한 확대가 있으면 그 값, 없으면 85 %. 실패하면 원래 파일."""
+    import io as _io, re as _re, zipfile as _zf
+    try:
+        zin = _zf.ZipFile(_io.BytesIO(b))
+        names = [n for n in zin.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")]
+        if not names:
+            return b
+        rx = _re.compile(r"<sheetView\b([^>]*?)(/?)>")
+
+        def _sv(m):
+            a = m.group(1)
+            zs = _re.search(r'\bzoomScale="(\d+)"', a)
+            z = zs.group(1) if zs and zs.group(1) != "100" else "85"
+            a = _re.sub(r'\s(?:view|zoomScale|zoomScaleSheetLayoutView)="[^"]*"', "", a)
+            if "zoomScaleNormal=" not in a:
+                a += ' zoomScaleNormal="100"'
+            return f'<sheetView{a} view="pageBreakPreview" zoomScale="{z}" zoomScaleSheetLayoutView="{z}"{m.group(2)}>'
+        new = {}
+        for n in names:
+            x = zin.read(n).decode("utf-8")
+            y = rx.sub(_sv, x, count=1)
+            if y == x and "<sheetView" not in x:          # 보기 설정이 없는 시트 (계산정보 등) — 넣음
+                mm = _re.search(r"<(?:sheetFormatPr|cols|sheetData)\b", x)
+                if mm:
+                    y = (x[:mm.start()] + '<sheetViews><sheetView workbookViewId="0" zoomScaleNormal="100" view="pageBreakPreview" '
+                         'zoomScale="85" zoomScaleSheetLayoutView="85"/></sheetViews>' + x[mm.start():])
+            if y != x:
+                new[n] = y
+        if not new:
+            return b
+        out = _io.BytesIO()
+        with _zf.ZipFile(out, "w", _zf.ZIP_DEFLATED) as zo:
+            for it in zin.infolist():
+                zo.writestr(it, new[it.filename].encode("utf-8") if it.filename in new else zin.read(it.filename))
+        return out.getvalue()
+    except Exception:  # noqa: BLE001
+        return b
+
+
 def _pj_stamp(data, fname, S=None):
     """내려받는 파일에 계산 정보 붙이기 — 실패하면 원래 파일 그대로"""
     try:
@@ -1036,7 +1078,7 @@ def _pj_stamp(data, fname, S=None):
             return data
         raw = data.getvalue() if hasattr(data, "getvalue") else data
         if ext in ("xlsx", "xlsm") and isinstance(raw, (bytes, bytearray)):
-            return _pj_stamp_xlsx(_pj_xl_sub(_pj_xl_cache(bytes(raw))), lines)
+            return _pj_xl_view(_pj_stamp_xlsx(_pj_xl_sub(_pj_xl_cache(bytes(raw))), lines))
         if ext == "docx" and isinstance(raw, (bytes, bytearray)):
             return _pj_stamp_docx(bytes(raw), lines)
         if ext in ("html", "htm", "doc"):
