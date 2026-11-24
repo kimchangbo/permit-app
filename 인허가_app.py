@@ -2615,18 +2615,23 @@ def _pj_own_put(hook, project, data):
 
 
 def _pj_keep_deferred(mm, items):
-    """[2026-11-09] 💾 저장 단추의 지연 다운로드 등록을 프로세스에 잠깐(최근 300개) 보관.
+    """[2026-11-09] 💾 저장 단추의 지연 다운로드 등록을 프로세스에 잠깐 보관.
     Streamlit 은 상자가 다시 그려질 때 옛 등록을 지움 → 느린 서버(Cloud)에서 다시 그려지는 사이에 누른 첫 누름이
-    '등록 없음'으로 사라짐. 실행 때 등록이 없으면 보관본을 되넣어 그대로 저장되게 함 (내용 · 파일 이름은 누르는 순간 값)."""
-    import sys as _sy, collections as _co
+    '등록 없음'으로 사라짐. 실행 때 등록이 없으면 보관본을 되넣어 그대로 저장되게 함 (내용 · 파일 이름은 누르는 순간 값).
+    [2026-11-24] 보관 = 최근 2 개 · 2 분까지만. 등록 하나 (저장 함수) 가 그 화면 실행의 모든 자료 (그림 · 표 · 3D 모양) 를 붙잡고 있어,
+    300 개씩 보관하니 화면을 다시 그릴 때마다 메모리가 쌓였음 (32번 울산 2-2 예제 : 한 번에 +50 MB → Cloud 'Oh no')."""
+    import sys as _sy, collections as _co, time as _tm
     keep = getattr(_sy, "_pj_dl_keep", None)
     if keep is None:
         keep = _co.OrderedDict()
         _sy._pj_dl_keep = keep
+    now = _tm.time()
     for k, e in items:
-        keep[k] = e
+        keep[k] = (now, e)
         keep.move_to_end(k)
-    while len(keep) > 300:
+    for k in [k_ for k_, v_ in keep.items() if not isinstance(v_, tuple) or now - v_[0] > 120.0]:
+        keep.pop(k, None)
+    while len(keep) > 2:
         keep.popitem(last=False)
     if getattr(mm, "_pj_keep_patched", False):
         return
@@ -2635,8 +2640,9 @@ def _pj_keep_deferred(mm, items):
     def ex(file_id, _o=orig, _m=mm):
         try:
             with _m._lock:
-                if file_id not in _m._deferred_callables and file_id in _sy._pj_dl_keep:
-                    _m._deferred_callables[file_id] = _sy._pj_dl_keep[file_id]
+                _v = _sy._pj_dl_keep.get(file_id)
+                if file_id not in _m._deferred_callables and isinstance(_v, tuple):
+                    _m._deferred_callables[file_id] = _v[1]
         except Exception:  # noqa: BLE001
             pass
         return _o(file_id)
@@ -2685,6 +2691,10 @@ def _pj_patch_download():
             pass
         if callable(d):
             put(lambda _f=d, _S=S: _pj_stamp(_f(), fname, _S))
+        elif str(fname or "").lower().rsplit(".", 1)[-1] in ("html", "htm", "doc", "xlsx", "xlsm", "docx"):
+            # [2026-11-20] 미리 만든 보고서도 계산 정보 · 수식 스크립트 (MathJax 약 2 MB) 는 누르는 순간 붙임 —
+            #  전에는 화면을 그릴 때마다 붙여 접속마다 서버 메모리에 2 MB 넘게 더 잡혔음 (Streamlit Cloud 'Oh no')
+            put(lambda _d=d, _S=S: _pj_stamp(_d, fname, _S))
         else:
             put(_pj_stamp(d, fname, S))
         return orig(self, *a, **k)
@@ -2756,6 +2766,127 @@ def _pj_block():
     _pj_patch_stop()
     _pj_patch_eqimg()
     _pj_patch_mpl_lock()
+    _pj_patch_latex()
+    _pj_mpl_cache_clear()
+
+
+def _pj_mpl_cache_clear():
+    """[2026-11-20] matplotlib 글꼴 · 수식 캐시 비우기 (실행마다 처음 · 끝) — 캐시 열쇠에 스레드 번호가 들어가
+    (font_manager.get_font 의 thread_id), Streamlit 이 다시 그릴 때마다 새 스레드라 글꼴 · 수식 글꼴 덩어리가 계속 쌓임
+    → 서버 메모리 한도 초과 ('Oh no'). 13번 시험 : 다시 그릴 때마다 +85 MB → +8 MB. 쓰는 중인 그림은 자기 참조가 있어 안전"""
+    try:
+        import matplotlib.font_manager as _fm
+        import matplotlib.mathtext as _mmt
+        _fm._get_font.cache_clear()
+        _mmt.MathTextParser._parse_cached.cache_clear()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _pj_tex_split(s, lim=60):
+    """[2026-11-17] 긴 수식을 위아래 줄로 (좁은 화면 잘림 방지) — 맨 바깥(중괄호 · \\left…\\right 밖)에서
+    ① \\qquad · ',\\quad' · ',\\ ' · '\\quad (' 로 나누고 ② 그래도 긴 조각이 '=' 를 둘 넘게 이으면 '=' 앞에서 나눠 맞춤.
+    이미 여러 줄(\\\\ · \\begin)인 식 · 짧은 식 · 나눌 곳이 없는 식은 그대로"""
+    return s          # [2026-11-18] 사용자 '원래대로 — 줄을 나누니 여백이 많아 화면 구성이 안 좋음' → 나누지 않음 (아래 코드는 남겨 둠)
+    if not isinstance(s, str) or len(s) < lim or "\\\\" in s or "\\begin" in s:
+        return s
+
+    def scan(x, at_eq=False):
+        parts, cur, dep, lr, i, n = [], [], 0, 0, 0, len(x)
+        while i < n:
+            c = x[i]
+            if c == "\\":
+                m = i + 1
+                while m < n and x[m].isalpha():
+                    m += 1
+                w = x[i + 1:m]
+                top = dep == 0 and lr == 0
+                if m == i + 1:                         # \{ \, \; \  같은 한 글자 명령
+                    if (not at_eq and top and x[i + 1:i + 2] == " " and "".join(cur).rstrip().endswith(",")):
+                        parts.append("".join(cur))
+                        cur = []
+                        i += 2
+                        continue
+                    cur.append(x[i:i + 2])
+                    i += 2
+                    continue
+                if w == "left":
+                    lr += 1
+                elif w == "right":
+                    lr -= 1
+                if not at_eq and top and w in ("qquad", "quad"):
+                    prev = "".join(cur).rstrip()
+                    nxt = x[m:].lstrip()
+                    if w == "qquad" or prev.endswith(",") or nxt.startswith("("):
+                        parts.append(prev)
+                        cur = []
+                        i = m
+                        continue
+                cur.append(x[i:m])
+                i = m
+                continue
+            if c == "{":
+                dep += 1
+            elif c == "}":
+                dep -= 1
+            elif at_eq and c == "=" and dep == 0 and lr == 0:
+                parts.append("".join(cur))
+                cur = []
+                i += 1
+                continue
+            cur.append(c)
+            i += 1
+        parts.append("".join(cur))
+        return parts, dep == 0 and lr == 0
+
+    parts, ok = scan(s)
+    if not ok:
+        return s
+    parts = [p.strip().rstrip(",").rstrip() for p in parts if p.strip().strip(",").strip()]
+    out = []
+    for p in parts:
+        q, ok2 = scan(p, at_eq=True)
+        q = [y.strip() for y in q]
+        if ok2 and len(p) > lim and len(q) >= 3 and all(q):
+            out.append("\\begin{aligned}" + q[0] + " &= " + q[1] + "".join(" \\\\ &= " + y for y in q[2:]) + "\\end{aligned}")
+        else:
+            out.append(p)
+    if len(out) == 1 and out[0] == s.strip():
+        return s
+    if len(out) == 1:
+        return out[0]
+    return "\\begin{gathered}" + " \\\\ ".join(out) + "\\end{gathered}"
+
+
+def _pj_patch_latex():
+    """[2026-11-17] 좁은 화면(휴대폰)에서 긴 수식이 잘려 보이던 것 — st.latex 를 감싸 \\qquad · ',\\quad' 로 이은 긴 식을 위아래 줄로 (프로세스에 한 번)"""
+    try:
+        from streamlit.delta_generator import DeltaGenerator as _DG
+    except Exception:  # noqa: BLE001
+        return
+    _DG._pj_split = staticmethod(_pj_tex_split)          # 늘 이번 실행의 최신 함수 (프로세스에 남은 옛 감싸기도 이것을 씀)
+    cur = _DG.latex
+    if getattr(cur, "_pj_ver", None) == _PJ_VER:
+        return
+    orig = getattr(cur, "_pj_orig", cur)
+
+    def latex(self, body, *a, **k):
+        try:
+            body = _DG._pj_split(body)
+        except Exception:  # noqa: BLE001
+            pass
+        return orig(self, body, *a, **k)
+    latex._pj_ver, latex._pj_orig = _PJ_VER, orig
+    _DG.latex = latex
+    try:
+        st.latex = lambda body, *a, **k: latex(st._main, body, *a, **k)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_PJ_TEX_CSS = ("<style>.katex-display{overflow-x:auto;overflow-y:hidden;padding-bottom:2px}"
+               ".katex-display::-webkit-scrollbar{height:6px}.katex-display::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}"
+               "@media (max-width:640px){.katex-display>.katex{font-size:1.0em}}</style>")
 
 
 def _pj_patch_mpl_lock():
@@ -2801,6 +2932,10 @@ def _pj_credit(extra=None):
     """제작자 표시 — 제목 바로 밑 (모든 앱 같은 모양 : Made by 이름 @ 소속 · 판 · ©)"""
     import html as _h
     cr = _PJ.get("credit")
+    try:
+        pass                                                   # [2026-11-18] 긴 수식 CSS 도 원래대로 (사용자)
+    except Exception:  # noqa: BLE001
+        pass
     if cr:
         tail = (f" · {_h.escape(str(extra))}" if extra else "") + " · © 2026 All rights reserved."
         st.markdown(f"<div style='font-size:0.82rem;color:#5A6B7D;margin:-0.4rem 0 0.6rem'>Made by "
@@ -2891,6 +3026,7 @@ def _pj_end():
     if _PJ_PANEL["done"]:
         return
     _PJ_PANEL["done"] = True
+    _pj_mpl_cache_clear()
     try:
         _pj_panel(_PJ_PANEL["c"])
     except Exception as e:  # noqa: BLE001
@@ -3759,8 +3895,23 @@ def _pj_panel(c):
                 try:                                  # [2026-11-03] 방금 등록된 이 단추의 지연 다운로드 정보를 붙잡아 둠 (누르는 순간 파일 이름을 바꾸려고)
                     from streamlit import runtime as _rt
                     _mm = _rt.get_instance().media_file_mgr
-                    _mine = [(_k, _e) for _k, _e in list(getattr(_mm, "_deferred_callables", {}).items())
-                             if _e.get("callable") is _save or _e.get("filename") == _fn]
+                    # [2026-11-24] 이번 실행의 등록만 붙잡음. 전에는 '파일 이름이 같은 등록' 을 모두 붙잡아 이전 실행의 등록까지 딸려 들어왔고,
+                    #   그 등록 → 이전 저장 함수 → 그 이전 등록 … 으로 사슬이 이어져 실행마다 화면 자료 전체가 안 지워짐 (실제 서버에서만 — Cloud 'Oh no' 원인)
+                    def _pj_own(_e, _S0=_save):
+                        _c = _e.get("callable")
+                        if _c is _S0:
+                            return True
+                        for _cl in (getattr(_c, "__closure__", None) or ()):
+                            try:
+                                if _cl.cell_contents is _S0:
+                                    return True
+                            except ValueError:
+                                pass
+                        return False
+                    _all = list(getattr(_mm, "_deferred_callables", {}).items())
+                    _mine = [(_k, _e) for _k, _e in _all if _pj_own(_e)]
+                    if not _mine:
+                        _mine = [(_k, _e) for _k, _e in _all if _e.get("filename") == _fn][-1:]
                     _fn_box += [_e for _k, _e in _mine]
                     _pj_keep_deferred(_mm, _mine)     # [2026-11-09] 다시 그려져 지워진 옛 단추를 눌러도 저장되게
                 except Exception:  # noqa: BLE001
@@ -5212,15 +5363,18 @@ with col2:
         # 엑셀 처리
         excel_df = res_df.copy()
         excel_df['상세링크'] = excel_df['상세링크'].str.replace(r'<.*?>', '', regex=True)
-        excel_buffer = BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            excel_df.to_excel(writer, index=False, sheet_name='법령업데이트_결과')
+
+        def _law_xl_bytes(_d=excel_df):   # [2026-11-16] 누를 때 만듦
+            excel_buffer = BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                _d.to_excel(writer, index=False, sheet_name='법령업데이트_결과')
+            return excel_buffer.getvalue()
         
         col_dl1, col_dl2, col_dl3 = st.columns(3)
         with col_dl1:
             st.download_button(
                 label="💾 Excel 다운로드",
-                data=excel_buffer.getvalue(),
+                data=_law_xl_bytes,
                 file_name=f"인허가법령_보고서_{datetime.now():%Y%m%d}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
@@ -5229,7 +5383,7 @@ with col2:
         with col_dl2:
             st.download_button(
                 label="🌐 HTML 보고서 다운로드",
-                data=get_html_bytes(res_df),
+                data=lambda _d=res_df: get_html_bytes(_d),   # [2026-11-16] 누를 때 만듦
                 file_name=f"인허가법령_종합보고서_{datetime.now():%Y%m%d}.html",
                 mime="text/html",
                 use_container_width=True
@@ -5239,7 +5393,7 @@ with col2:
             if DOCX_AVAILABLE:
                 st.download_button(
                     label="📝 MS Word (.docx) 다운로드",
-                    data=get_docx_bytes(res_df),
+                    data=lambda _d=res_df: get_docx_bytes(_d),   # [2026-11-16] 누를 때 만듦
                     file_name=f"인허가법령_종합보고서_{datetime.now():%Y%m%d}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True
@@ -6107,23 +6261,26 @@ with st.expander("📅 인허가 일정표 (법정 검토 기간 기준)"):
                     unsafe_allow_html=True)
     else:
         st.caption("해당 인허가가 없습니다.")
-_xb = BytesIO()
-with pd.ExcelWriter(_xb, engine="openpyxl") as _w:
-    pd.DataFrame([{"항목": k, "값": v} for k, v in [("사업명", sc_name), ("지역", sc_region), ("항만 구분", sc_port), ("사업 단계", sc_stage), ("발주 방식", sc_order[2:].strip()),
-                                                     ("사업 주체", sc_owner), ("공사 위치", sc_loc), ("총공사비(억원)", sc_cost), ("사업면적(m²)", sc_area),
-                                                     ("최대 굴착깊이(m)", sc_exc), ("용도지역", sc_zone), ("준설 면적(m²)", sc_dred_a),
-                                                     ("공유수면 점용·사용 면적(m²)", sc_occ), ("수심 4m 미만", "예" if sc_shallow else "아니오"),
-                                                     ("변경·증설 사업", "예" if sc_chg else "아니오")] + ([("기 협의 사업면적(m²)", sc_area0), ("기 협의 외곽 길이(m)", sc_outer0),
-                                                     ("5년 이내 미착공", "예" if sc_5y else "아니오"), ("7년 이상 공사중지 후 재개", "예" if sc_7y else "아니오")] if sc_chg else [])
-                                                    + [("기준일", "2026.11")]]).to_excel(_w, sheet_name="사업개요", index=False)
-    sc_fac[sc_fac["선택"]].to_excel(_w, sheet_name="설계대상시설", index=False)
-    sc_df[show_cols].to_excel(_w, sheet_name="인허가판정", index=False)
-    scope_th_df().to_excel(_w, sheet_name="판정기준표", index=False)
-    pd.DataFrame([{k: v for k, v in r.items() if k not in ("법령", "바로가기")} | {"법제처 바로가기": " / ".join(u for _n, u in r["바로가기"])}
-                  for r in _lk_rows]).to_excel(_w, sheet_name="근거·바로가기", index=False)
-    if len(sc_sch):
-        sc_sch[["번호", "인허가", "판정", "단계", "법정 검토 (일)", "협의 요청 늦어도", "협의 완료 목표", "상태", "비고"]].to_excel(_w, sheet_name="인허가일정", index=False)
-st.download_button("💾 인허가 분석 결과 Excel 다운로드", data=_xb.getvalue(), file_name=f"인허가분석_{sc_name}.xlsx",
+def _sc_xl_bytes():   # [2026-11-16] 누를 때 만듦
+    _xb = BytesIO()
+    with pd.ExcelWriter(_xb, engine="openpyxl") as _w:
+        pd.DataFrame([{"항목": k, "값": v} for k, v in [("사업명", sc_name), ("지역", sc_region), ("항만 구분", sc_port), ("사업 단계", sc_stage), ("발주 방식", sc_order[2:].strip()),
+                                                         ("사업 주체", sc_owner), ("공사 위치", sc_loc), ("총공사비(억원)", sc_cost), ("사업면적(m²)", sc_area),
+                                                         ("최대 굴착깊이(m)", sc_exc), ("용도지역", sc_zone), ("준설 면적(m²)", sc_dred_a),
+                                                         ("공유수면 점용·사용 면적(m²)", sc_occ), ("수심 4m 미만", "예" if sc_shallow else "아니오"),
+                                                         ("변경·증설 사업", "예" if sc_chg else "아니오")] + ([("기 협의 사업면적(m²)", sc_area0), ("기 협의 외곽 길이(m)", sc_outer0),
+                                                         ("5년 이내 미착공", "예" if sc_5y else "아니오"), ("7년 이상 공사중지 후 재개", "예" if sc_7y else "아니오")] if sc_chg else [])
+                                                        + [("기준일", "2026.11")]]).to_excel(_w, sheet_name="사업개요", index=False)
+        sc_fac[sc_fac["선택"]].to_excel(_w, sheet_name="설계대상시설", index=False)
+        sc_df[show_cols].to_excel(_w, sheet_name="인허가판정", index=False)
+        scope_th_df().to_excel(_w, sheet_name="판정기준표", index=False)
+        pd.DataFrame([{k: v for k, v in r.items() if k not in ("법령", "바로가기")} | {"법제처 바로가기": " / ".join(u for _n, u in r["바로가기"])}
+                      for r in _lk_rows]).to_excel(_w, sheet_name="근거·바로가기", index=False)
+        if len(sc_sch):
+            sc_sch[["번호", "인허가", "판정", "단계", "법정 검토 (일)", "협의 요청 늦어도", "협의 완료 목표", "상태", "비고"]].to_excel(_w, sheet_name="인허가일정", index=False)
+    return _xb.getvalue()
+
+st.download_button("💾 인허가 분석 결과 Excel 다운로드", data=_sc_xl_bytes, file_name=f"인허가분석_{sc_name}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
