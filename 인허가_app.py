@@ -2715,8 +2715,9 @@ def _pj_block():
     ss["_pj_loaded"] = bool(p)          # 불러온 실행에서는 _pj_k 가 값을 지우지 않음
     if p:
         n, ok_keys, types = 0, _pj_widget_keys(S), p.get("types") or {}
+        _pf = isinstance(p.get("files"), dict) and bool(p.get("files"))     # [2026-11-27] 도면이 든 저장 파일 — 도면을 읽은 뒤에 생기는 입력칸 (in_…) 값도 미리 넣어 둠
         for k, v in (p.get("inputs") or {}).items():
-            if k not in ok_keys or v is None:
+            if (k not in ok_keys and not (_pf and isinstance(k, str) and k.startswith("in_"))) or v is None:
                 continue
             try:
                 ss[k] = _pj_dec(v, types.get(k, ""))
@@ -2734,9 +2735,19 @@ def _pj_block():
             if _PJ["tables"][t]:
                 ss.pop(_PJ["tables"][t], None)
             nt += 1
+        ss.pop("_pj_files_in", None)                          # [2026-11-26] pj-12 저장 파일에 든 도면 → 앱이 올린 파일처럼 씀
+        nf = 0
+        if isinstance(p.get("files"), dict):
+            try:
+                import base64 as _b6, gzip as _gz
+                fin = {sl: [(str(f_["name"]), _gz.decompress(_b6.b64decode(f_["gz"]))) for f_ in lst] for sl, lst in p["files"].items()}
+                ss["_pj_files_in"] = fin
+                nf = sum(len(v) for v in fin.values())
+            except Exception:  # noqa: BLE001
+                pass
         if p.get("project"):
             ss["_pj_pname"] = str(p["project"])
-        ss["_pj_msg"] = (f"불러왔습니다 (저장 {p.get('saved', '-')}) — 입력 {n}개" + (f" · 표 {nt}개" if nt else "") + " 반영")
+        ss["_pj_msg"] = (f"불러왔습니다 (저장 {p.get('saved', '-')}) — 입력 {n}개" + (f" · 표 {nt}개" if nt else "") + (f" · 도면 파일 {nf}개" if nf else "") + " 반영")
     # (2) 계산 정보 (프로그램 판 = 파일 수정일 + 코드 지문, 입력 지문 = 저장 대상 입력값 지문)
     try:
         src = _os.path.abspath(__file__)
@@ -3546,7 +3557,8 @@ def _pj_lib_put(body):
             body["own"] = own
             fp = _pj_finger({"o": {k: v for k, v in own.items() if k not in ("saved", "_계산정보")}})
         else:
-            fp = _pj_finger({"i": body.get("inputs"), "t": body.get("tables")})
+            fp = _pj_finger(dict({"i": body.get("inputs"), "t": body.get("tables")},
+                            **({"f": {sl: [[f_.get("name"), f_.get("size")] for f_ in lst] for sl, lst in body["files"].items()}} if isinstance(body.get("files"), dict) else {})))
         d = _pj_lib_dir(True)
         # [2026-11-11] 파일 이름 = 프로젝트명 (예 '동방파제 두부.json', 같은 이름에 다른 입력이면 ' (2)') — 같은 입력인지는 파일 안 지문(finger)으로
         fn, old = None, {}
@@ -3763,6 +3775,28 @@ def _pj_body(S):
     tabs = {t: v for t, v in tabs.items() if v is not None}
     if tabs:
         body["tables"] = tabs
+    # [2026-11-26] pj-12 올린 도면 파일도 같이 저장 (앱이 ss["_pj_files"] = {자리: [(이름, 바이트), …]} 를 채워 둔 경우 — 32 케이슨 3D · 표준단면도)
+    try:
+        fl = S["_pj_files"] if "_pj_files" in S else None
+    except Exception:  # noqa: BLE001
+        fl = None
+    if fl:
+        try:
+            import base64 as _b6, gzip as _gz
+            out = {}
+            for sl, lst in fl.items():
+                if lst:
+                    rows = []
+                    for f_ in lst:                              # (이름, 바이트) 또는 올린 파일 객체 (name · getvalue) — 누르는 순간에만 읽음
+                        n, b = (f_ if isinstance(f_, (tuple, list)) else (f_.name, f_.getvalue()))
+                        if len(b) <= 40 * 1024 * 1024:
+                            rows.append({"name": str(n), "size": len(b), "gz": _b6.b64encode(_gz.compress(bytes(b), 6)).decode("ascii")})
+                    if rows:
+                        out[str(sl)] = rows
+            if out:
+                body["files"] = out
+        except Exception:  # noqa: BLE001
+            pass
     return body
 
 
@@ -3776,7 +3810,7 @@ def _pj_lib_load_cb():
     if r and isinstance(r.get("own"), dict):        # [2026-10-26] 앱 자체 저장 파일 → 앱 자체 불러오기로 (14 · 29 · 30)
         ss["_pj_own_pending"] = r["own"]
     elif r:
-        ss["_pj_pending"] = {k: r.get(k) for k in ("app", "project", "inputs", "types", "tables")}
+        ss["_pj_pending"] = {k: r.get(k) for k in ("app", "project", "inputs", "types", "tables", "files")}
         ss["_pj_pending"]["saved"] = r.get("last")
     ss["_pj_lib_pick"] = None
 
